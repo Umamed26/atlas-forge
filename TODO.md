@@ -182,3 +182,22 @@ pnpm build
 **交付物**：可运行仓库 + `examples/`（示例世界 JSON、经典/Aged Ink 成图、应用截图）+ `README.md` 使用与架构说明 + 本 TODO 验收记录。
 
 **遗留（非首版目标）**：地名/城镇交互式改名拖动、8192 低内存压测、Firefox/Safari 兼容、多尺度下钻/球面投影/账号云同步。
+
+## 13. v1.1 地点与地名编辑（2026-10-18）
+
+**新增功能（用户已选）**：地点与地名编辑 —— 单击选中、双击改名、拖动定位、隐藏/恢复、新增地点（city/town/port/fortress/ruin/custom）与标注（region/water/mountain/custom），全部写入世界 JSON，支持撤销/重做、自动保存与种子往返保留。
+
+**契约变更（additive）**：
+- `WorldLayers.hidden?: { settlements: Settlement[]; labels: MapLabel[] }` —— 被 hiddenIds 过滤的条目（含生成与 pinned）供 UI「恢复」列表。
+- 合并语义统一为「hidden 优先」：`overrides.hiddenIds` 同时压制生成条目与用户 pinned 条目；用户 pinned 条目按 id 覆盖生成条目。
+
+**渲染修正**：`layers.autoLabels` 与 `document.labels` 按 id 合并去重（用户优先），settlement 合并过滤 hiddenIds，避免重复标签/隐藏条目重新出现。
+
+**验证**：
+- core：10 test files / 50 tests 全绿（新增 places 6 用例：pinned 覆盖、用户新增可复现、hidden 压制+恢复、hidden 稳定性）
+- render：14 组断言全绿（新增 label 去重、hidden 过滤、pinned 覆盖、用户新增 label）
+- web：typecheck/build 通过；ui-dev QA 85/85 断言、0 console/page error
+- Lead E2E：放置→改名→撤销/重做→拖动→隐藏→恢复→新增标注→JSON 导出→刷新恢复 全通过；0 console/page error
+- GitHub：public 仓库 `Umamed26/atlas-forge`，main 分支，CI（typecheck + tests + build）通过
+
+**已知限制**：命中测试基于条目锚点 16px（长标签文字范围未覆盖，密集区取最近）；自动命名随机但落盘后确定；生成条目只能隐藏、用户新增条目可彻底删除。

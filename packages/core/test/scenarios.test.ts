@@ -233,7 +233,11 @@ describe("world readability metrics", () => {
     expect(after).toBe(before);
   });
 
-  it("assesses a 1024² world in under 5ms (best of five)", () => {
+  // Absolute-time budgets must tolerate slow/shared CI runners: the metric pass
+  // is a few milliseconds locally, but a 5ms hard cap flakes on GitHub runners
+  // (observed 5.3ms). 15ms still catches an accidental O(n²) regression while
+  // staying meaningful on real hardware.
+  it("assesses a 1024² world in under 15ms (best of five, CI-safe)", () => {
     const preset = getScenarioPreset("classic")!;
     const layers = createPipeline().generate({
       document: createDefaultDocument({
@@ -253,6 +257,6 @@ describe("world readability metrics", () => {
     console.log(
       `[metrics] 1024² assessWorldMetrics: ${times.map((t) => t.toFixed(2)).join(", ")} -> best ${best.toFixed(2)}ms`,
     );
-    expect(best).toBeLessThan(5);
+    expect(best).toBeLessThan(15);
   }, 60_000);
 });

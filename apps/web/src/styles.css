@@ -1,0 +1,71 @@
+:root {
+  color-scheme: dark;
+  --bg: #151310;
+  --panel: #211d17;
+  --panel-border: #3a332a;
+  --ink: #e9e0cc;
+  --muted: #a3957c;
+  --accent: #d7b46a;
+  font-family: "Inter", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: radial-gradient(circle at 20% 0%, #262017 0%, var(--bg) 55%);
+  color: var(--ink);
+  min-height: 100vh;
+}
+
+.app { display: flex; flex-direction: column; min-height: 100vh; }
+
+.topbar {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 14px 22px; border-bottom: 1px solid var(--panel-border);
+  background: rgba(24, 20, 15, 0.85); backdrop-filter: blur(8px);
+}
+
+.brand { display: flex; align-items: center; gap: 10px; }
+.brand h1 { font-size: 18px; margin: 0; letter-spacing: 0.06em; }
+.brand-mark { color: var(--accent); font-size: 20px; }
+.badge {
+  font-size: 11px; color: var(--muted); border: 1px solid var(--panel-border);
+  padding: 2px 8px; border-radius: 999px;
+}
+
+.actions button, .status-box button {
+  background: linear-gradient(#3a3022, #2a2318); color: var(--ink);
+  border: 1px solid #58493493; padding: 8px 14px; border-radius: 8px;
+  cursor: pointer; font-size: 13px;
+}
+.actions button:hover { border-color: var(--accent); color: var(--accent); }
+
+.layout { display: grid; grid-template-columns: 300px 1fr; gap: 18px; padding: 18px 22px; flex: 1; }
+
+.panel {
+  background: var(--panel); border: 1px solid var(--panel-border);
+  border-radius: 14px; padding: 18px; align-self: start;
+  display: flex; flex-direction: column; gap: 14px;
+}
+.panel h2 { margin: 0; font-size: 16px; }
+.hint { margin: -8px 0 0; color: var(--muted); font-size: 12px; }
+
+.field { display: flex; flex-direction: column; gap: 6px; font-size: 12px; color: var(--muted); }
+.field input[type="range"] { accent-color: var(--accent); }
+
+.status-box {
+  margin-top: 6px; border-top: 1px solid var(--panel-border); padding-top: 12px;
+  display: flex; flex-direction: column; gap: 6px; font-size: 12px; color: var(--muted);
+}
+.status-box strong { color: var(--ink); font-weight: 500; }
+.error { color: #e08a7a; margin: 0; }
+
+.stage { display: flex; align-items: flex-start; justify-content: center; }
+.canvas-frame {
+  border: 1px solid var(--panel-border);
+  padding: 10px; border-radius: 14px; background: #1b1712;
+  box-shadow: 0 30px 80px rgba(0, 0, 0, 0.45);
+  max-width: min(78vh, 100%);
+}
+.map-canvas { display: block; width: 100%; height: auto; border-radius: 8px; }

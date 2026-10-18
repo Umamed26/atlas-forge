@@ -1,0 +1,24 @@
+{
+  "name": "atlas-forge",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "concurrently -k -n web,api -c cyan,magenta \"pnpm --filter @atlas/web dev\" \"pnpm --filter @atlas/server dev\"",
+    "dev:web": "pnpm --filter @atlas/web dev",
+    "dev:api": "pnpm --filter @atlas/server dev",
+    "build": "pnpm -r build",
+    "test": "pnpm -r test",
+    "typecheck": "pnpm -r typecheck",
+    "qa:render": "tsx scripts/qa-render.ts"
+  },
+  "devDependencies": {
+    "@atlas/core": "workspace:*",
+    "@atlas/render": "workspace:*",
+    "@napi-rs/canvas": "^0.1.60",
+    "@types/node": "^24.0.0",
+    "concurrently": "^9.1.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0"
+  }
+}

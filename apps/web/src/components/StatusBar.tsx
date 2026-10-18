@@ -67,7 +67,13 @@ function StatusTicker() {
   return (
     <div className="statusbar-item statusbar-status">
       <span className={`status-dot status-dot--${info.tone}`} aria-hidden="true" />
-      <span data-testid="status" data-state={info.state} title={generation.error ?? ""}>
+      <span
+        data-testid="status"
+        data-state={info.state}
+        role="status"
+        aria-live="polite"
+        title={generation.error ?? ""}
+      >
         {info.text}
       </span>
       {active && elapsed !== null ? (

@@ -7,6 +7,7 @@ import {
   type ReactNode,
 } from "react";
 
+import { readStoredBoolean, writeStoredBoolean } from "../lib/uiPrefs";
 import { clamp } from "../lib/utils";
 
 // ── Collapsible section ───────────────────────────────────────────────────
@@ -56,6 +57,63 @@ export function Section({
           {children}
         </div>
       ) : null}
+    </section>
+  );
+}
+
+// ── Collapsible top-level group (sticky header + persisted state) ─────────
+
+export interface CollapsibleGroupProps {
+  title: string;
+  icon?: string;
+  storageKey: string;
+  defaultOpen?: boolean;
+  summary?: ReactNode;
+  children: ReactNode;
+  testId?: string;
+  className?: string;
+}
+
+export function CollapsibleGroup({
+  title,
+  icon,
+  storageKey,
+  defaultOpen = true,
+  summary,
+  children,
+  testId,
+  className,
+}: CollapsibleGroupProps) {
+  const [open, setOpen] = useState(() => readStoredBoolean(storageKey, defaultOpen));
+  const toggle = () => {
+    setOpen((previous) => {
+      writeStoredBoolean(storageKey, !previous);
+      return !previous;
+    });
+  };
+  return (
+    <section
+      className={`panel-group ${open ? "is-open" : ""} ${className ?? ""}`}
+      data-testid={testId}
+    >
+      <button
+        type="button"
+        className="panel-group-head"
+        aria-expanded={open}
+        onClick={toggle}
+      >
+        <span className="panel-group-chevron" aria-hidden="true">
+          {open ? "▾" : "▸"}
+        </span>
+        {icon ? (
+          <span className="panel-group-icon" aria-hidden="true">
+            {icon}
+          </span>
+        ) : null}
+        <span className="panel-group-title">{title}</span>
+        {summary ? <span className="panel-group-summary">{summary}</span> : null}
+      </button>
+      {open ? <div className="panel-group-body">{children}</div> : null}
     </section>
   );
 }

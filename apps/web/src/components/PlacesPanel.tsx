@@ -5,6 +5,7 @@
  */
 import { useEffect, useMemo, useRef, useState } from "react";
 
+import { focusMapCanvas } from "../lib/focus";
 import {
   collectPlaces,
   findPlace,
@@ -15,7 +16,7 @@ import {
 } from "../lib/places";
 import { useViewStore } from "../state/viewStore";
 import { useWorldStore } from "../state/worldStore";
-import { Section } from "./ui";
+
 
 export function PlacesPanel() {
   const document = useWorldStore((state) => state.document);
@@ -70,25 +71,36 @@ export function PlacesPanel() {
     locate(entry);
   };
 
+  /** Commit once, using the *live* store state so blur-after-Escape is a no-op. */
   const commitRename = () => {
-    if (!placeRename) return;
-    useWorldStore.getState().renamePlace(placeRename.id, placeRename.entity, renameValue);
+    const active = useWorldStore.getState().placeRename;
+    if (!active) return;
+    useWorldStore.getState().renamePlace(active.id, active.entity, renameValue);
+    focusMapCanvas();
+  };
+
+  const cancelRename = () => {
+    useWorldStore.getState().cancelPlaceRename();
+    focusMapCanvas();
   };
 
   return (
-    <Section
-      title="地点与地名"
-      icon="◉"
-      testId="section-places"
-      className="section--places"
-      actions={
+    <div className="places-content" data-testid="section-places">
+      <span className="visually-hidden" aria-live="polite">
+        {selected
+          ? `已选中${placeEntityLabel(selected.entity)}「${selected.name}」`
+          : "未选中地点"}
+      </span>
+      <div className="places-topline">
+        <span className="places-title">地点与地名</span>
         <span className="section-count" data-testid="place-count">
           地点 {counts.settlements} · 标注 {counts.labels}
           {counts.hidden > 0 ? ` · 隐藏 ${counts.hidden}` : ""}
         </span>
-      }
-      note="用「地点」工具（快捷键 4）：单击选中 · 拖动定位 · 双击改名；「放置」后点击地图新增。"
-    >
+      </div>
+      <p className="section-note">
+        用「地点」工具（快捷键 4）：单击选中 · 拖动定位 · 双击改名；「放置」后点击地图新增。
+      </p>
       {tool !== "places" ? (
         <button
           type="button"
@@ -137,10 +149,14 @@ export function PlacesPanel() {
                     event.preventDefault();
                     commitRename();
                   } else if (event.key === "Escape") {
+                    // Cancel only the rename; do not let the global handler
+                    // deselect the place as a second Escape action.
                     event.preventDefault();
-                    useWorldStore.getState().cancelPlaceRename();
+                    event.stopPropagation();
+                    cancelRename();
                   }
                 }}
+                onBlur={commitRename}
               />
               <button
                 type="button"
@@ -153,7 +169,8 @@ export function PlacesPanel() {
               <button
                 type="button"
                 className="btn btn--small btn--ghost"
-                onClick={() => useWorldStore.getState().cancelPlaceRename()}
+                onMouseDown={(event) => event.preventDefault()}
+                onClick={cancelRename}
               >
                 取消
               </button>
@@ -278,6 +295,6 @@ export function PlacesPanel() {
           </ul>
         </div>
       ) : null}
-    </Section>
+    </div>
   );
 }

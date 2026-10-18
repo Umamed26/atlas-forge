@@ -10,7 +10,7 @@ import { createHash } from "node:crypto";
 import { freemem, totalmem } from "node:os";
 import Fastify from "fastify";
 import cors from "@fastify/cors";
-import { createCanvas, GlobalFonts } from "@napi-rs/canvas";
+import { createCanvas, GlobalFonts, type Canvas } from "@napi-rs/canvas";
 import {
   DEFAULT_PARAMS,
   MAX_RENDER_SIZE,
@@ -65,23 +65,63 @@ class QueueFullError extends Error {
   statusCode = 429;
 }
 
+/** Client closed the connection before the render finished. */
+class ClientAbortError extends Error {
+  statusCode = 499;
+  code = "CLIENT_ABORTED";
+  constructor() {
+    super("client closed request");
+  }
+}
+
 // ── Small renderer concurrency guard ──────────────────────────────────────
 let activeRenders = 0;
-const queue: Array<() => void> = [];
+let completedRenders = 0;
+let abortedRenders = 0;
+let lastRenderMs: number | null = null;
+interface QueueWaiter {
+  grant: () => void;
+  reject: (error: Error) => void;
+  isClientGone: () => boolean;
+}
+const queue: QueueWaiter[] = [];
 
-function acquireSlot(): Promise<() => void> {
+function acquireSlot(isClientGone: () => boolean = () => false): Promise<() => void> {
   return new Promise((resolve, reject) => {
     const grant = (): void => {
       activeRenders += 1;
       resolve(() => {
         activeRenders -= 1;
-        const next = queue.shift();
-        if (next) next();
+        // Hand the slot to the next *live* waiter; aborted waiters are dropped
+        // immediately so a gone client never keeps the renderer busy.
+        for (;;) {
+          const next = queue.shift();
+          if (!next) return;
+          if (next.isClientGone()) {
+            abortedRenders += 1;
+            next.reject(new ClientAbortError());
+            continue;
+          }
+          next.grant();
+          return;
+        }
       });
     };
-    if (activeRenders === 0 && queue.length === 0) grant();
-    else if (queue.length >= MAX_QUEUE) reject(new QueueFullError("renderer busy, retry shortly"));
-    else queue.push(grant);
+    if (activeRenders === 0 && queue.length === 0) {
+      if (isClientGone()) {
+        reject(new ClientAbortError());
+        return;
+      }
+      grant();
+    } else if (queue.length >= MAX_QUEUE) {
+      reject(new QueueFullError("renderer busy, retry shortly"));
+    } else {
+      queue.push({
+        grant,
+        reject: (error: Error) => reject(error),
+        isClientGone,
+      });
+    }
   });
 }
 
@@ -142,15 +182,20 @@ async function renderPng(
   size: number,
   quality: "preview" | "export",
   simSize: number,
+  isClientGone: () => boolean,
 ): Promise<RenderResult> {
-  const release = await acquireSlot();
+  const release = await acquireSlot(isClientGone);
   const totalStart = now();
   try {
+    // The client may have closed while this request was waiting in the queue.
+    if (isClientGone()) throw new ClientAbortError();
+
     const simStart = now();
     const layers = pipeline.generate({ document, size: simSize });
     const simMs = now() - simStart;
+    if (isClientGone()) throw new ClientAbortError();
 
-    const canvas = createCanvas(size, size);
+    let canvas: Canvas | null = createCanvas(size, size);
     const ctx = canvas.getContext("2d");
     const renderStart = now();
     const stats = renderWorld({
@@ -163,6 +208,12 @@ async function renderPng(
     });
     const renderMs = now() - renderStart;
 
+    // Yield one event-loop turn so a socket `close` / request `aborted` event
+    // queued while the synchronous render blocked the loop is observed before
+    // paying for a large PNG encode.
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    if (isClientGone()) throw new ClientAbortError();
+
     const encodeStart = now();
     // Skia's encoder is fine for preview sizes; the fast zlib path keeps the
     // 4096²/8192² export inside the latency budget.
@@ -174,6 +225,13 @@ async function renderPng(
         )
       : canvas.toBuffer("image/png");
     const encodeMs = now() - encodeStart;
+
+    // Drop the large native surface / context references before returning; the
+    // caller only keeps the PNG buffer, so 4096/8192 exports do not accumulate.
+    const nativeCanvas = canvas as unknown as { width: number; height: number };
+    void nativeCanvas;
+    canvas = null;
+    void layers;
 
     return {
       png,
@@ -259,7 +317,13 @@ app.get("/api/health", async () => ({
     maxQueue: MAX_QUEUE,
     renderTimeoutMs: RENDERER_TIMEOUT_MS || null,
   },
-  rendererState: { active: activeRenders, queued: queue.length },
+  rendererState: {
+    active: activeRenders,
+    queued: queue.length,
+    completed: completedRenders,
+    aborted: abortedRenders,
+    lastRenderMs,
+  },
   memory: {
     rssMb: Math.round(process.memoryUsage().rss / 1048576),
     freeMb: Math.round(freemem() / 1048576),
@@ -332,8 +396,61 @@ app.post<{ Body: RenderRequestBody }>("/api/render", async (request, reply) => {
 
   const quality = qualityFor(size);
   const started = now();
+
+  // Client-abort tracking: if the socket closes while we wait in the queue or
+  // during the synchronous render, the request is dropped as soon as the render
+  // yields (before the expensive PNG encode) so it never blocks the renderer.
+  let clientAborted = false;
+  const markAborted = (): void => {
+    if (!reply.raw.writableEnded) clientAborted = true;
+  };
+  reply.raw.once("close", markAborted);
+  request.raw.once("aborted", markAborted);
+  request.raw.once("close", () => {
+    // Normal requests also emit `close` after the body is consumed; only a
+    // pre-response close with an incomplete message means the client vanished.
+    if (!request.raw.complete) markAborted();
+  });
+  const isClientGone = (): boolean =>
+    clientAborted || request.raw.aborted === true || request.raw.socket?.destroyed === true;
+
+  if (isClientGone()) {
+    abortedRenders += 1;
+    request.log.info({ size, simSize }, "client gone before render started");
+    try {
+      reply.raw.destroy();
+    } catch {
+      // socket already gone
+    }
+    return reply;
+  }
+
   try {
-    const result = await withTimeout(renderPng(document, size, quality, simSize), RENDERER_TIMEOUT_MS);
+    const result = await withTimeout(
+      renderPng(document, size, quality, simSize, isClientGone),
+      RENDERER_TIMEOUT_MS,
+    );
+    if (isClientGone()) {
+      abortedRenders += 1;
+      request.log.info(
+        {
+          size,
+          simSize,
+          totalMs: Math.round(result.totalMs),
+          droppedBytes: result.png.length,
+          rssMb: Math.round(process.memoryUsage().rss / 1048576),
+        },
+        "client aborted; rendered PNG dropped before send",
+      );
+      try {
+        reply.raw.destroy();
+      } catch {
+        // socket already gone
+      }
+      return reply;
+    }
+    completedRenders += 1;
+    lastRenderMs = Math.round(result.totalMs);
     const documentHash = createHash("sha1")
       .update(JSON.stringify({ seed: document.seed, params: document.params, style: document.style }))
       .digest("hex")
@@ -349,6 +466,7 @@ app.post<{ Body: RenderRequestBody }>("/api/render", async (request, reply) => {
         totalMs: Math.round(result.totalMs),
         bytes: result.png.length,
         seed: document.seed,
+        rssMb: Math.round(process.memoryUsage().rss / 1048576),
       },
       "render completed",
     );
@@ -373,6 +491,16 @@ app.post<{ Body: RenderRequestBody }>("/api/render", async (request, reply) => {
       .send(result.png);
   } catch (error) {
     const statusCode = (error as { statusCode?: number }).statusCode ?? 500;
+    if (statusCode === 499 || isClientGone()) {
+      abortedRenders += 1;
+      request.log.info({ size, simSize, totalMs: Math.round(now() - started) }, "render aborted by client");
+      try {
+        reply.raw.destroy();
+      } catch {
+        // socket already gone
+      }
+      return reply;
+    }
     request.log.error({ err: error, size, simSize }, "render failed");
     return reply.code(statusCode).send({
       error: error instanceof Error ? error.message : String(error),

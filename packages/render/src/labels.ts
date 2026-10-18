@@ -33,9 +33,91 @@ export interface LabelOptions {
 
 export interface LabelStats {
   drawn: number;
+  /** Settlement markers drawn. */
   settlements: number;
+  /** Settlement name labels drawn (subset of `drawn`). */
+  settlementNames: number;
   skipped: number;
   fontFamily: string;
+}
+
+/**
+ * A label / settlement layout box in image pixels (top-left origin). This is
+ * produced by the exact same layout pass that `renderWorld` paints, so screen
+ * space hit-testing can use it without duplicating cartographic rules.
+ */
+export interface MeasuredLabel {
+  /** Label id or settlement id, matching the WorldDocument / layers content. */
+  id: string;
+  entity: "label" | "settlement";
+  /** Text as drawn (region / mountain / settlement names are upper-cased). */
+  text: string;
+  /** Bounding box in image pixels. For a settlement this covers glyph + name. */
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  /** Convenience = x + width/2. */
+  centerX: number;
+  /** Convenience = y + height/2. */
+  centerY: number;
+  /** Paint order: larger = drawn later = visually on top. */
+  drawOrder: number;
+  /** Layout priority (lower value = more important = painted earlier). */
+  priority: number;
+  pinned: boolean;
+}
+
+interface PrecomputedWidths {
+  chars: string[];
+  widths: number[];
+  total: number;
+}
+
+interface LaidText {
+  type: "text";
+  entity: "label" | "settlement";
+  id: string;
+  kind: Drawable["kind"];
+  text: string;
+  font: string;
+  tracking: number;
+  precomputed?: PrecomputedWidths;
+  sizePx: number;
+  /** Text centre in image pixels. */
+  textX: number;
+  textY: number;
+  rotation: number;
+  /** Tracked text width / layout height in px. */
+  tw: number;
+  th: number;
+  sea: boolean;
+  /** Normalized source coordinates (used for ink grain / diagnostics). */
+  sourceX: number;
+  sourceY: number;
+  priority: number;
+  pinned: boolean;
+}
+
+interface LaidMarker {
+  type: "marker";
+  id: string;
+  drawable: Drawable;
+  /** Marker anchor in image pixels. */
+  cx: number;
+  cy: number;
+}
+
+export type LaidItem = LaidText | LaidMarker;
+
+export interface LabelLayout {
+  /** Paint sequence: markers and text in the exact order they are drawn. */
+  items: LaidItem[];
+  measured: MeasuredLabel[];
+  drawn: number;
+  settlements: number;
+  settlementNames: number;
+  skipped: number;
 }
 
 export interface Drawable {
@@ -437,8 +519,109 @@ export function collectLabelDrawables(
   });
 }
 
-/** Draw all labels and settlement markers. */
-export function drawLabels(ctx: Ctx2D, opts: LabelOptions): LabelStats {
+/** Marker half-extent in px, used for the measured settlement bbox. */
+function markerExtent(kind: Settlement["kind"] | undefined, scale: number): number {
+  switch (kind) {
+    case "city":
+      return 3.4 * scale;
+    case "port":
+      return 5 * scale;
+    case "fortress":
+      return 2.5 * scale;
+    case "ruin":
+      return 2.2 * scale;
+    default:
+      return 2.6 * scale;
+  }
+}
+
+/** Axis-aligned layout box of a (possibly rotated) text item. */
+function textBBox(item: LaidText): { x: number; y: number; width: number; height: number } {
+  let width = item.tw;
+  let height = item.th;
+  if (Math.abs(item.rotation) > 1e-4) {
+    const cos = Math.abs(Math.cos(item.rotation));
+    const sin = Math.abs(Math.sin(item.rotation));
+    width = item.tw * cos + item.th * sin;
+    height = item.tw * sin + item.th * cos;
+  }
+  return {
+    x: item.textX - width / 2,
+    y: item.textY - height / 2,
+    width,
+    height,
+  };
+}
+
+/** Turn the paint sequence into the public hit-test boxes. */
+function buildMeasured(items: LaidItem[], scale: number): MeasuredLabel[] {
+  const measured: MeasuredLabel[] = [];
+  const settlementIndex = new Map<string, number>();
+  for (const item of items) {
+    if (item.type === "marker") {
+      const drawable = item.drawable;
+      const extent = markerExtent(drawable.settlement?.kind, scale);
+      const text =
+        drawable.uppercase || drawable.sea ? drawable.text.toUpperCase() : drawable.text;
+      settlementIndex.set(item.id, measured.length);
+      measured.push({
+        id: item.id,
+        entity: "settlement",
+        text,
+        x: item.cx - extent,
+        y: item.cy - extent,
+        width: extent * 2,
+        height: extent * 2,
+        centerX: item.cx,
+        centerY: item.cy,
+        drawOrder: measured.length,
+        priority: drawable.priority,
+        pinned: drawable.pinned,
+      });
+      continue;
+    }
+    const box = textBBox(item);
+    if (item.entity === "settlement") {
+      const index = settlementIndex.get(item.id);
+      const existing = index === undefined ? undefined : measured[index];
+      if (existing) {
+        // Merge the name box into the settlement marker box.
+        const maxX = Math.max(existing.x + existing.width, box.x + box.width);
+        const maxY = Math.max(existing.y + existing.height, box.y + box.height);
+        existing.x = Math.min(existing.x, box.x);
+        existing.y = Math.min(existing.y, box.y);
+        existing.width = maxX - existing.x;
+        existing.height = maxY - existing.y;
+        existing.centerX = existing.x + existing.width / 2;
+        existing.centerY = existing.y + existing.height / 2;
+        existing.text = item.text;
+        continue;
+      }
+    }
+    measured.push({
+      id: item.id,
+      entity: item.entity,
+      text: item.text,
+      x: box.x,
+      y: box.y,
+      width: box.width,
+      height: box.height,
+      centerX: box.x + box.width / 2,
+      centerY: box.y + box.height / 2,
+      drawOrder: measured.length,
+      priority: item.priority,
+      pinned: item.pinned,
+    });
+  }
+  return measured;
+}
+
+/**
+ * Layout pass: font metrics, tracking, collision avoidance, sea-label search,
+ * frame / decoration avoid rects and paint order. No painting happens here, so
+ * `measureMapContent` can reuse the exact same boxes that `renderWorld` draws.
+ */
+export function layoutMapLabels(ctx: Ctx2D, opts: LabelOptions): LabelLayout {
   const { width, height, scale, theme } = opts;
   const style = opts.document.style;
   const drawables = collectDrawables(opts);
@@ -446,24 +629,17 @@ export function drawLabels(ctx: Ctx2D, opts: LabelOptions): LabelStats {
   const frameInset = Math.min(width, height) * 0.034;
   let drawnCount = 0;
   let settlementCount = 0;
+  let settlementNames = 0;
   let skipped = 0;
   const density = Math.min(1, Math.max(0, style.labelDensity));
   const maxLabels = Math.round((opts.quality === "export" ? 46 : 24) * (0.45 + 0.55 * density));
-  const fonts = getRenderFonts();
-  ctx.textBaseline = "middle";
-  ctx.textAlign = "center";
-  ctx.lineJoin = "round";
-  ctx.lineCap = "round";
-  const haloWidth = theme.label.haloWidth;
-  const haloColor = cssRgb(theme.ink.halo, theme.label.haloAlpha);
+  const items: LaidItem[] = [];
 
   for (const item of drawables) {
     const text = item.uppercase || item.sea ? item.text.toUpperCase() : item.text;
     const font = textFont(text, item.sizePx, item.italic);
     const tracking = item.sea ? item.tracking * 1.7 : item.tracking;
-    // Measure once per label; reuse the widths for the halo, fill and double
-    // print passes.
-    let precomputed: { chars: string[]; widths: number[]; total: number } | undefined;
+    let precomputed: PrecomputedWidths | undefined;
     let tw: number;
     ctx.font = font;
     if (tracking > 0) {
@@ -528,7 +704,7 @@ export function drawLabels(ctx: Ctx2D, opts: LabelOptions): LabelStats {
         skipped += 1;
       }
       // The marker itself always draws, even when a name had to be dropped.
-      drawSettlementMarker(ctx, cx, cy, item, theme, scale);
+      items.push({ type: "marker", id: item.settlement?.id ?? item.id, drawable: item, cx, cy });
       settlementCount += 1;
       if (!placed) continue;
     } else {
@@ -583,7 +759,14 @@ export function drawLabels(ctx: Ctx2D, opts: LabelOptions): LabelStats {
             // water labels are allowed on water but not on dry land.
             let wet = false;
             for (const f of [0.08, 0.38, 0.5, 0.62, 0.92]) {
-              if (overWater(opts, px / width + ((f - 0.5) * boxW) / width, py / height, item.kind === "water")) {
+              if (
+                overWater(
+                  opts,
+                  px / width + ((f - 0.5) * boxW) / width,
+                  py / height,
+                  item.kind === "water",
+                )
+              ) {
                 wet = true;
                 break;
               }
@@ -609,8 +792,57 @@ export function drawLabels(ctx: Ctx2D, opts: LabelOptions): LabelStats {
     }
     blockers.push(rect);
     drawnCount += 1;
+    if (isSettlement) settlementNames += 1;
+    items.push({
+      type: "text",
+      entity: isSettlement ? "settlement" : "label",
+      id: isSettlement ? item.settlement?.id ?? item.id : item.id,
+      kind: item.kind,
+      text,
+      font,
+      tracking,
+      precomputed,
+      sizePx: item.sizePx,
+      textX,
+      textY,
+      rotation: item.rotation,
+      tw,
+      th,
+      sea: item.sea,
+      sourceX: item.x,
+      sourceY: item.y,
+      priority: item.priority,
+      pinned: item.pinned,
+    });
+  }
+
+  return {
+    items,
+    measured: buildMeasured(items, opts.scale),
+    drawn: drawnCount,
+    settlements: settlementCount,
+    settlementNames,
+    skipped,
+  };
+}
+
+/** Paint a layout produced by `layoutMapLabels`. */
+function paintLabelLayout(ctx: Ctx2D, opts: LabelOptions, layout: LabelLayout): void {
+  const { theme, scale } = opts;
+  ctx.textBaseline = "middle";
+  ctx.textAlign = "center";
+  ctx.lineJoin = "round";
+  ctx.lineCap = "round";
+  const haloWidth = theme.label.haloWidth;
+  const haloColor = cssRgb(theme.ink.halo, theme.label.haloAlpha);
+
+  for (const item of layout.items) {
+    if (item.type === "marker") {
+      drawSettlementMarker(ctx, item.cx, item.cy, item.drawable, theme, scale);
+      continue;
+    }
     ctx.save();
-    ctx.translate(textX, textY);
+    ctx.translate(item.textX, item.textY);
     if (item.rotation !== 0) ctx.rotate(item.rotation);
     const drawAt = (offsetX: number, offsetY: number): void => {
       ctx.save();
@@ -618,36 +850,46 @@ export function drawLabels(ctx: Ctx2D, opts: LabelOptions): LabelStats {
       if (haloWidth > 0) {
         ctx.strokeStyle = haloColor;
         ctx.lineWidth = Math.max(1, item.sizePx * haloWidth);
-        ctx.font = font;
-        if (tracking === 0) {
-          ctx.strokeText(text, 0, 0);
+        ctx.font = item.font;
+        if (item.tracking === 0) {
+          ctx.strokeText(item.text, 0, 0);
         } else {
-          strokeTracked(ctx, text, tracking, font, item.sizePx, precomputed);
+          strokeTracked(ctx, item.text, item.tracking, item.font, item.sizePx, item.precomputed);
         }
       }
-      ctx.font = font;
+      ctx.font = item.font;
       ctx.fillStyle = cssRgb(
         item.kind === "water" ? theme.ink.labelWater : theme.ink.label,
         item.sea ? 0.78 : item.kind === "custom" ? 0.94 : 0.9,
       );
-      if (tracking === 0) {
-        ctx.fillText(text, 0, 0);
+      if (item.tracking === 0) {
+        ctx.fillText(item.text, 0, 0);
       } else {
-        drawTrackedText(ctx, text, 0, 0, item.sizePx, tracking, font, "center", precomputed);
+        drawTrackedText(
+          ctx,
+          item.text,
+          0,
+          0,
+          item.sizePx,
+          item.tracking,
+          item.font,
+          "center",
+          item.precomputed,
+        );
       }
       ctx.restore();
     };
     // Faint double-printed ink for hand-pressed character (export only: the
     // preview frame budget is tight and the effect is invisible at small sizes).
     if (opts.quality === "export") {
-      inkedText(ctx, drawAt, item.sizePx * 0.018, hash01(item.x * 1000, item.y * 1000, opts.seed));
+      inkedText(ctx, drawAt, item.sizePx * 0.018, hash01(item.sourceX * 1000, item.sourceY * 1000, opts.seed));
     } else {
       drawAt(0, 0);
     }
     // Region names get a small decorative rule beneath the text.
     if (item.kind === "region") {
       const ruleY = item.sizePx * 0.72;
-      const half = tw * 0.52;
+      const half = item.tw * 0.52;
       ctx.strokeStyle = cssRgb(theme.ink.main, 0.32);
       ctx.lineWidth = Math.max(0.6, 0.75 * scale);
       ctx.beginPath();
@@ -668,11 +910,18 @@ export function drawLabels(ctx: Ctx2D, opts: LabelOptions): LabelStats {
     }
     ctx.restore();
   }
+}
+
+/** Draw all labels and settlement markers. */
+export function drawLabels(ctx: Ctx2D, opts: LabelOptions): LabelStats {
+  const layout = layoutMapLabels(ctx, opts);
+  paintLabelLayout(ctx, opts, layout);
   return {
-    drawn: drawnCount,
-    settlements: settlementCount,
-    skipped,
-    fontFamily: fonts.resolvedFamily,
+    drawn: layout.drawn,
+    settlements: layout.settlements,
+    settlementNames: layout.settlementNames,
+    skipped: layout.skipped,
+    fontFamily: getRenderFonts().resolvedFamily,
   };
 }
 

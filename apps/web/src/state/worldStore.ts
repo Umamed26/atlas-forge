@@ -38,15 +38,26 @@ import {
   type ToolId,
 } from "../lib/constants";
 import {
+  clearAutosave,
   cloneDocumentForHistory,
-  loadAutosave,
+  loadAutosaveBackup,
+  loadAutosaveState,
+  saveAutosave,
 } from "../lib/documentIO";
+import type { PlaceHitBox } from "../lib/placeHitTest";
 import {
+  readStoredString,
+  UI_PREF_KEYS,
+  writeStoredString,
+} from "../lib/uiPrefs";
+import {
+  collectPlaceNames,
   collectPlaces,
   createUserLabel,
   createUserSettlement,
   generatePlaceName,
   isUserPlaceId,
+  uniquePlaceName,
   upsertLabel,
   upsertSettlement,
   type PlaceEntity,
@@ -62,10 +73,29 @@ export type ToastKind = "info" | "success" | "error";
 export type SavePhase = "idle" | "saving" | "saved" | "error";
 export type ServerPhase = "unknown" | "online" | "offline";
 
+export interface ToastAction {
+  kind: "export-json" | "recover-autosave";
+  label: string;
+}
+
 export interface ToastMessage {
   id: number;
   kind: ToastKind;
   text: string;
+  action?: ToastAction;
+}
+
+export interface PerfMetrics {
+  hitTestMs: number | null;
+  hitTestAt: number | null;
+  lastGenerationMs: number | null;
+  lastRenderMs: number | null;
+}
+
+export interface AutosaveRecoveryState {
+  message: string;
+  hasBackup: boolean;
+  backupSavedAt: number | null;
 }
 
 export interface GenerationStatus {
@@ -165,6 +195,13 @@ export interface WorldStore {
   placeRename: PlaceSelection | null;
   toast: ToastMessage | null;
 
+  // ── polish: export / performance / autosave recovery ──
+  exportSize: number;
+  perf: PerfMetrics;
+  hitBoxes: PlaceHitBox[] | null;
+  hitBoxesSource: "renderer" | "marker" | null;
+  autosaveRecovery: AutosaveRecoveryState | null;
+
   // ── document mutations ──
   commitDocument(next: WorldDocument, options?: CommitOptions): void;
   beginInteraction(): void;
@@ -217,6 +254,14 @@ export interface WorldStore {
   deletePlace(id: string, entity: PlaceEntity): void;
   addPlaceAt(x: number, y: number): void;
 
+  // ── polish: export size / perf / hit boxes / autosave recovery ──
+  setExportSize(size: number): void;
+  recordHitTest(ms: number): void;
+  setHitBoxes(boxes: PlaceHitBox[] | null, source: "renderer" | "marker" | null): void;
+  dismissAutosaveRecovery(): void;
+  recoverAutosave(): void;
+  clearCorruptedAutosave(): void;
+
   // ── generation lifecycle (called by the worker client) ──
   requestGeneration(mode: SimTrigger): void;
   requestRender(): void;
@@ -239,7 +284,7 @@ export interface WorldStore {
   markSaved(savedAt: number): void;
   markSaveError(message: string): void;
   setServerStatus(status: Omit<ServerStatus, "checkedAt"> & { checkedAt?: number }): void;
-  pushToast(kind: ToastKind, text: string): void;
+  pushToast(kind: ToastKind, text: string, action?: ToastAction): void;
   dismissToast(id: number): void;
 }
 
@@ -248,15 +293,32 @@ export interface WorldStore {
 interface InitialDocument {
   document: WorldDocument;
   restoredFromAutosave: boolean;
+  autosaveRecovery: AutosaveRecoveryState | null;
 }
 
 function createInitialDocument(): InitialDocument {
-  const restored = loadAutosave();
-  if (restored) return { document: restored, restoredFromAutosave: true };
-  return {
-    document: createDefaultDocument({ name: "Aetheris", seed: 20261018 }),
-    restoredFromAutosave: false,
-  };
+  const fallback = () =>
+    createDefaultDocument({ name: "Aetheris", seed: 20261018 });
+  const state = loadAutosaveState();
+  if (state.corrupted) {
+    return {
+      document: fallback(),
+      restoredFromAutosave: false,
+      autosaveRecovery: {
+        message: state.corruptedMessage ?? "浏览器自动存档已损坏",
+        hasBackup: state.hasBackup,
+        backupSavedAt: state.backupSavedAt,
+      },
+    };
+  }
+  if (state.document) {
+    return {
+      document: state.document,
+      restoredFromAutosave: true,
+      autosaveRecovery: null,
+    };
+  }
+  return { document: fallback(), restoredFromAutosave: false, autosaveRecovery: null };
 }
 
 // ── History helpers ───────────────────────────────────────────────────────
@@ -284,10 +346,12 @@ function commitPendingHistory(get: () => WorldStore): boolean {
 }
 
 let toastSeq = 0;
+let lastToastSignature = "";
+let lastToastAt = 0;
 
-function makeToast(kind: ToastKind, text: string): ToastMessage {
+function makeToast(kind: ToastKind, text: string, action?: ToastAction): ToastMessage {
   toastSeq += 1;
-  return { id: toastSeq, kind, text };
+  return { id: toastSeq, kind, text, ...(action ? { action } : {}) };
 }
 
 const TOOL_IDS = new Set<ToolId>(["pan", "elevation", "river", "biome", "places"]);
@@ -375,6 +439,16 @@ export const useWorldStore = create<WorldStore>()((set, get) => {
     },
     placeRename: null,
     toast: null,
+    exportSize: (() => {
+      const stored = Number(readStoredString(UI_PREF_KEYS.exportSize, "2048"));
+      return stored === 1024 || stored === 2048 || stored === 4096 || stored === 8192
+        ? stored
+        : 2048;
+    })(),
+    perf: { hitTestMs: null, hitTestAt: null, lastGenerationMs: null, lastRenderMs: null },
+    hitBoxes: null,
+    hitBoxesSource: null,
+    autosaveRecovery: initial.autosaveRecovery,
 
     // ── history ────────────────────────────────────────────────────────
     beginInteraction: () => {
@@ -905,12 +979,14 @@ export const useWorldStore = create<WorldStore>()((set, get) => {
     },
 
     addPlaceAt: (x, y) => {
-      const { document, placeTool } = get();
+      const { document, layers, placeTool } = get();
       const px = clamp01(x);
       const py = clamp01(y);
+      const existingNames = collectPlaceNames(collectPlaces(document, layers));
       if (placeTool.mode === "settlement") {
         const kind = placeTool.settlementKind;
-        const name = placeTool.name.trim() || generatePlaceName("settlement", kind);
+        const baseName = placeTool.name.trim() || generatePlaceName("settlement", kind);
+        const name = uniquePlaceName(baseName, existingNames);
         const entry = createUserSettlement(px, py, kind, name);
         get().commitDocument(
           {
@@ -926,7 +1002,8 @@ export const useWorldStore = create<WorldStore>()((set, get) => {
         get().pushToast("success", `已添加地点「${entry.name}」：拖动定位，双击改名`);
       } else {
         const kind = placeTool.labelKind;
-        const name = placeTool.name.trim() || generatePlaceName("label", kind);
+        const baseName = placeTool.name.trim() || generatePlaceName("label", kind);
+        const name = uniquePlaceName(baseName, existingNames);
         const entry = createUserLabel(px, py, kind, name);
         get().commitDocument(
           { ...document, labels: upsertLabel(document.labels ?? [], entry) },
@@ -938,6 +1015,53 @@ export const useWorldStore = create<WorldStore>()((set, get) => {
         });
         get().pushToast("success", `已添加标注「${entry.text}」：拖动定位，双击改名`);
       }
+    },
+
+    // ── polish: export size / perf / hit boxes / autosave recovery ────
+    setExportSize: (size) => {
+      const allowed = [1024, 2048, 4096, 8192];
+      const next = allowed.includes(size) ? size : 2048;
+      writeStoredString(UI_PREF_KEYS.exportSize, String(next));
+      set({ exportSize: next });
+    },
+
+    recordHitTest: (ms) => {
+      const now = Date.now();
+      set((state) => {
+        if (state.perf.hitTestAt !== null && now - state.perf.hitTestAt < 150) return {};
+        return { perf: { ...state.perf, hitTestMs: ms, hitTestAt: now } };
+      });
+    },
+
+    setHitBoxes: (boxes, source) => {
+      set({ hitBoxes: boxes, hitBoxesSource: source });
+    },
+
+    dismissAutosaveRecovery: () => {
+      set({ autosaveRecovery: null });
+    },
+
+    recoverAutosave: () => {
+      const backup = loadAutosaveBackup();
+      if (!backup) {
+        get().dismissAutosaveRecovery();
+        get().pushToast("error", "没有可恢复的上一份自动存档");
+        return;
+      }
+      get().importDocument(backup.document);
+      set({ autosaveRecovery: null });
+      // Drop the corrupt main payload first so the recovered write does not
+      // copy it into the backup slot.
+      clearAutosave(true);
+      const result = saveAutosave(backup.document);
+      if (result.ok) get().markSaved(result.savedAt);
+      get().pushToast("success", "已恢复上一份自动存档");
+    },
+
+    clearCorruptedAutosave: () => {
+      clearAutosave(true);
+      set({ autosaveRecovery: null });
+      get().pushToast("info", "已清空损坏的自动存档，将继续使用当前世界");
     },
 
     // ── generation lifecycle ───────────────────────────────────────────
@@ -1016,6 +1140,10 @@ export const useWorldStore = create<WorldStore>()((set, get) => {
             durationMs: startedAt ? now - startedAt : layers.stats.totalMs,
             queuedLatest: false,
           },
+          perf: {
+            ...state.perf,
+            lastGenerationMs: startedAt ? now - startedAt : layers.stats.totalMs,
+          },
           renderTick: state.renderTick + 1,
         };
       });
@@ -1060,6 +1188,7 @@ export const useWorldStore = create<WorldStore>()((set, get) => {
           error: null,
           baseVersion: state.render.baseVersion + 1,
         },
+        perf: { ...state.perf, lastRenderMs: elapsedMs },
       }));
     },
 
@@ -1094,6 +1223,7 @@ export const useWorldStore = create<WorldStore>()((set, get) => {
       set((state) => ({
         save: { phase: "error", savedAt: state.save.savedAt, error: message },
       }));
+      get().pushToast("error", message, { kind: "export-json", label: "立即导出备份" });
     },
 
     setServerStatus: (status) => {
@@ -1107,8 +1237,13 @@ export const useWorldStore = create<WorldStore>()((set, get) => {
       });
     },
 
-    pushToast: (kind, text) => {
-      set({ toast: makeToast(kind, text) });
+    pushToast: (kind, text, action) => {
+      const signature = `${kind}:${text}`;
+      const now = Date.now();
+      if (signature === lastToastSignature && now - lastToastAt < 1200) return;
+      lastToastSignature = signature;
+      lastToastAt = now;
+      set({ toast: makeToast(kind, text, action) });
     },
 
     dismissToast: (id) => {

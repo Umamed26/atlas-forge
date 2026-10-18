@@ -17,14 +17,19 @@ import type { Ctx2D } from "./canvas-types";
 import { buildCoastData, drawCoastline, drawLakes, drawSea } from "./coast";
 import { planDecorations } from "./decor";
 import { extractRivers, drawRivers, type RiverPath } from "./hydro";
-import { drawLabels, type LabelStats } from "./labels";
+import {
+  drawLabels,
+  layoutMapLabels,
+  type LabelStats,
+  type MeasuredLabel,
+} from "./labels";
 import { drawMountainGlyphs } from "./mountains";
 import { drawForestGlyphs } from "./forests";
 import { buildTerrainField, getPaperTexture, rasterizeParchment } from "./raster";
 import { resolveTheme, type Quality } from "./style";
 import type { RenderPass } from "./pass";
 
-export const RENDERER_VERSION = "1.0.0";
+export const RENDERER_VERSION = "1.1.0";
 
 export interface RenderWorldInput {
   ctx: Ctx2D;
@@ -59,6 +64,7 @@ export interface RenderStats {
   riverCount: number;
   labelsDrawn: number;
   labelsSkipped: number;
+  settlementNames: number;
   settlements: number;
   landFraction: number;
   fontFamily: string;
@@ -186,6 +192,7 @@ export function renderWorld(input: RenderWorldInput): RenderStats {
     let labelStats: LabelStats = {
       drawn: 0,
       settlements: 0,
+      settlementNames: 0,
       skipped: 0,
       fontFamily: "",
     };
@@ -230,6 +237,7 @@ export function renderWorld(input: RenderWorldInput): RenderStats {
       riverCount: rivers.length,
       labelsDrawn: labelStats.drawn,
       labelsSkipped: labelStats.skipped,
+      settlementNames: labelStats.settlementNames,
       settlements: labelStats.settlements,
       landFraction: Number((layers.stats?.landFraction ?? 0).toFixed(4)),
       fontFamily: labelStats.fontFamily || "fallback serif",
@@ -238,6 +246,74 @@ export function renderWorld(input: RenderWorldInput): RenderStats {
     ctx.restore();
   }
 }
+
+/**
+ * Hit-testing / layout API (additive, v1.1.0).
+ *
+ * Returns the exact image-space boxes of the labels and settlement markers that
+ * `renderWorld` would paint for the same document / layers / size, using the
+ * same layout pass. Hidden or collision-skipped entries are omitted.
+ *
+ * Pure with respect to the document: only `ctx` is queried for `measureText`,
+ * and its state is restored before returning.
+ */
+export interface MeasureMapContentInput {
+  ctx: Ctx2D;
+  document: WorldDocument;
+  layers: WorldLayers;
+  width: number;
+  height: number;
+  /** Defaults to export when the shorter edge is >= 2048, preview otherwise. */
+  quality?: Quality;
+}
+
+export function measureMapContent(input: MeasureMapContentInput): MeasuredLabel[] {
+  const { ctx, document, layers, width, height } = input;
+  if (!Number.isFinite(width) || !Number.isFinite(height) || width < 1 || height < 1) {
+    throw new Error(`invalid measure size ${width}x${height}`);
+  }
+  const quality: Quality =
+    input.quality ?? (Math.min(width, height) >= 2048 ? "export" : "preview");
+  const theme = resolveTheme(document.style, quality);
+  const size = Math.min(width, height);
+  const scale = size / 1024;
+  const seed = (document.seed | 0) || 1;
+  const seaLevel = Math.min(0.95, Math.max(0.05, document.params.seaLevel));
+  const pass: RenderPass = {
+    ctx,
+    width,
+    height,
+    size,
+    scale,
+    theme,
+    seed,
+    quality,
+    document,
+    layers,
+    seaLevel,
+  };
+  // Decorations reserve the same avoid rects as renderWorld (cartouche, compass,
+  // legend, scale bar) so measured boxes match the painted result.
+  const avoid = planDecorations(pass).avoid;
+  ctx.save();
+  try {
+    return layoutMapLabels(ctx, {
+      width,
+      height,
+      scale,
+      theme,
+      seed,
+      quality,
+      document,
+      layers,
+      avoid,
+    }).measured;
+  } finally {
+    ctx.restore();
+  }
+}
+
+export type { MeasuredLabel } from "./labels";
 
 export { resolveTheme } from "./style";
 export type { Quality, RenderTheme } from "./style";

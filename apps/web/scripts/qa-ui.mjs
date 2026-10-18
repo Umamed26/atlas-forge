@@ -167,8 +167,16 @@ async function main() {
   });
   page.on("requestfailed", (request) => {
     const url = request.url();
-    if (!url.includes("favicon") && request.failure()) {
-      failedRequests.push(`${request.method()} ${url} :: ${request.failure()?.errorText}`);
+    const errorText = request.failure()?.errorText ?? "";
+    if (url.includes("favicon")) return;
+    // Cancelling a running export intentionally aborts its fetch; that is a
+    // product feature, not a failed request.
+    if (url.includes("/api/render") && errorText.includes("ERR_ABORTED")) {
+      notes.push(`expected aborted export request: ${url}`);
+      return;
+    }
+    if (request.failure()) {
+      failedRequests.push(`${request.method()} ${url} :: ${errorText}`);
     }
   });
 
@@ -200,6 +208,9 @@ async function main() {
       "tool-river",
       "tool-biome",
       "tool-places",
+      "group-places",
+      "group-params",
+      "group-brushes",
       "undo",
       "redo",
       "export-png",
@@ -977,6 +988,340 @@ async function main() {
   await page.keyboard.press("v");
   await page.waitForTimeout(120);
 
+
+  // ── 6e. P0: renderer-sourced hit boxes / undo semantics / keyboard ──
+  log("P0 hit boxes / undo / keyboard");
+  await page.keyboard.press("4");
+  await sleep(200);
+  await page.waitForFunction(
+    () => window.__atlasDebug.getSummary().hitBoxesSource !== null,
+    undefined,
+    { timeout: 30_000, polling: 100 },
+  );
+  const hitInfo = await page.evaluate(() => {
+    const data = window.__atlasDebug.getSummary();
+    return {
+      source: data.hitBoxesSource,
+      count: data.hitBoxCount,
+      perf: data.perf,
+      boxes: window.__atlasDebug.getPlaceHitBoxes(),
+    };
+  });
+  check(
+    "hit boxes are measured by the renderer (same source as painting)",
+    hitInfo.source === "renderer" && hitInfo.count > 0,
+    `source=${hitInfo.source} boxes=${hitInfo.count}`,
+  );
+  check(
+    "hit boxes expose image/world/screen rectangles",
+    hitInfo.boxes.length > 0 &&
+      hitInfo.boxes.every(
+        (box) => box.image.width > 0 && box.world.width > 0 && box.screen.width > 0,
+      ),
+  );
+  check(
+    "hit test latency is measured and cheap",
+    typeof hitInfo.perf.hitTestMs === "number" &&
+      hitInfo.perf.hitTestMs >= 0 &&
+      hitInfo.perf.hitTestMs < 5,
+    `${hitInfo.perf.hitTestMs}ms`,
+  );
+  const hitPriority = await page.evaluate(() => window.__atlasDebug.testHitPriority());
+  check(
+    "overlapping boxes resolve by drawOrder (topmost wins)",
+    hitPriority.hitId === "high-box" && hitPriority.usedBoxes === true,
+    JSON.stringify(hitPriority),
+  );
+  const seqBeforeHover = (await summary(page)).generation.seq;
+  await page.mouse.move(
+    canvasBox.x + canvasBox.width * 0.45,
+    canvasBox.y + canvasBox.height * 0.42,
+  );
+  await sleep(250);
+  check(
+    "hovering places never regenerates the world",
+    (await summary(page)).generation.seq === seqBeforeHover,
+  );
+
+  // a custom label: click near its bbox tail (far from the anchor point)
+  await page.locator('[data-testid="place-mode-label"]').click();
+  await page.locator('[data-testid="place-kind-select"]').selectOption("custom");
+  await page.locator('[data-testid="place-name-input"]').fill("极长测试标注名称");
+  await page.locator('[data-testid="place-add"]').click();
+  await clickCanvas(page, [0.62, 0.32]);
+  await waitIdle(page);
+  await page.waitForFunction(
+    () => {
+      const data = window.__atlasDebug.getSummary();
+      const place = data.places.list.find((entry) => entry.name === "极长测试标注名称");
+      if (!place) return false;
+      return window.__atlasDebug
+        .getPlaceHitBoxes()
+        .some((box) => box.id === place.id && box.entity === "label");
+    },
+    undefined,
+    { timeout: 30_000, polling: 100 },
+  );
+  const longLabel = await page.evaluate(() => {
+    const data = window.__atlasDebug.getSummary();
+    const place = data.places.list.find((entry) => entry.name === "极长测试标注名称");
+    if (!place) return null;
+    const box = window.__atlasDebug
+      .getPlaceHitBoxes()
+      .find((entry) => entry.id === place.id && entry.entity === "label");
+    return box ? { id: place.id, screen: box.screen, drawOrder: box.drawOrder } : null;
+  });
+  check(
+    "long custom label renders with a renderer bbox wider than the marker hit radius",
+    Boolean(longLabel && longLabel.screen.width > 60),
+    JSON.stringify(longLabel),
+  );
+  if (longLabel) {
+    await page.mouse.click(
+      canvasBox.x + longLabel.screen.x + longLabel.screen.width - 3,
+      canvasBox.y + longLabel.screen.y + longLabel.screen.height / 2,
+    );
+    await sleep(250);
+    check(
+      "clicking a label's bbox tail selects the label",
+      (await summary(page)).places.selected?.id === longLabel.id,
+      JSON.stringify((await summary(page)).places.selected),
+    );
+    await screenshot(page, "06e-hit-boxes.png");
+  }
+
+  // ── undo history semantics ──
+  await page.locator(`[data-testid="place-list-item-${addedId}"]`).click();
+  await sleep(150);
+  const renameBase = await summary(page);
+  await page.locator('[data-testid="place-rename"]').click();
+  await page.locator('[data-testid="place-rename-input"]').fill("取消测试");
+  await page.keyboard.press("Escape");
+  await sleep(220);
+  const afterCancelRename = await summary(page);
+  check(
+    "cancelling a rename adds no history entry",
+    afterCancelRename.history.undo === renameBase.history.undo,
+    `${renameBase.history.undo} -> ${afterCancelRename.history.undo}`,
+  );
+  check(
+    "Esc after a cancelled rename returns focus to the canvas",
+    (await page.evaluate(() => document.activeElement?.getAttribute("data-testid"))) === "map-canvas",
+  );
+  await page.locator('[data-testid="place-rename"]').click();
+  await page.locator('[data-testid="place-rename-input"]').fill("雾岭港");
+  await page.keyboard.press("Enter");
+  await waitIdle(page);
+  const afterRenameCommit = await summary(page);
+  check(
+    "rename commit adds exactly one history entry",
+    afterRenameCommit.history.undo === renameBase.history.undo + 1,
+    `${renameBase.history.undo} -> ${afterRenameCommit.history.undo}`,
+  );
+  check(
+    "rename commit returns focus to the canvas",
+    (await page.evaluate(() => document.activeElement?.getAttribute("data-testid"))) === "map-canvas",
+  );
+  await page.locator('[data-testid="place-rename"]').click();
+  const renameInput = page.locator('[data-testid="place-rename-input"]');
+  await renameInput.fill("测试删除键");
+  await renameInput.press("End");
+  await page.keyboard.press("Backspace");
+  await page.keyboard.press("Delete");
+  await sleep(180);
+  check(
+    "Backspace/Delete inside the rename input do not delete the place",
+    (await summary(page)).places.list.some((entry) => entry.id === addedId),
+  );
+  await page.keyboard.press("Escape");
+  await sleep(180);
+
+  // style slider drag: many input events, exactly one history entry
+  const styleBase = await summary(page);
+  await page.locator('[data-testid="style-paperTexture"]').evaluate((element) => {
+    element.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, pointerId: 1, button: 0 }));
+    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value").set;
+    for (const value of [0.6, 0.65, 0.7]) {
+      setter.call(element, String(value));
+      element.dispatchEvent(new Event("input", { bubbles: true }));
+    }
+    element.dispatchEvent(new PointerEvent("pointerup", { bubbles: true, pointerId: 1, button: 0 }));
+  });
+  await sleep(450);
+  check(
+    "style slider drag adds exactly one history entry",
+    (await summary(page)).history.undo === styleBase.history.undo + 1,
+    `${styleBase.history.undo} -> ${(await summary(page)).history.undo}`,
+  );
+
+  // drag commit: exactly one history entry
+  await page.locator(`[data-testid="place-list-item-${addedId}"]`).click();
+  await sleep(150);
+  const dragBase = await summary(page);
+  const historyDragMarker = await placeMarkerScreen(page, addedId);
+  await page.mouse.move(canvasBox.x + historyDragMarker.x, canvasBox.y + historyDragMarker.y);
+  await page.mouse.down();
+  await page.mouse.move(canvasBox.x + historyDragMarker.x + 60, canvasBox.y + historyDragMarker.y + 30, {
+    steps: 6,
+  });
+  await page.mouse.up();
+  await waitIdle(page);
+  check(
+    "drag commit adds exactly one history entry",
+    (await summary(page)).history.undo === dragBase.history.undo + 1,
+    `${dragBase.history.undo} -> ${(await summary(page)).history.undo}`,
+  );
+  await page.keyboard.press("Control+z");
+  await waitIdle(page);
+
+  // hide adds exactly one history entry
+  await page.locator(`[data-testid="place-list-item-${addedId}"]`).click();
+  await sleep(150);
+  const hideBase = await summary(page);
+  await page.locator('[data-testid="place-hide"]').click();
+  await page.waitForFunction(
+    (id) => window.__atlasDebug.getLayers().settlements.some((entry) => entry.id === id) === false,
+    addedId,
+    { timeout: 30_000, polling: 100 },
+  );
+  await waitIdle(page);
+  check(
+    "hiding a place adds exactly one history entry",
+    (await summary(page)).history.undo === hideBase.history.undo + 1,
+    `${hideBase.history.undo} -> ${(await summary(page)).history.undo}`,
+  );
+  await page.keyboard.press("Control+z");
+  await waitIdle(page);
+
+  // cross-feature undo chain: rename -> style toggle -> export -> import
+  log("cross-feature undo chain");
+  await page.locator(`[data-testid="place-list-item-${addedId}"]`).click();
+  await sleep(150);
+  await page.locator('[data-testid="place-rename"]').click();
+  await page.locator('[data-testid="place-rename-input"]').fill("跨功能名");
+  await page.keyboard.press("Enter");
+  await waitIdle(page);
+  const styleBeforeToggle = await page.evaluate(
+    () => window.__atlasDebug.getDocument().style.showCompass,
+  );
+  await page.locator('[data-testid="style-showCompass"]').click();
+  await sleep(300);
+  const afterStyleToggle = await summary(page);
+  const crossDownload = page.waitForEvent("download", { timeout: 20_000 });
+  await page.locator('[data-testid="export-json"]').click();
+  const crossJsonPath = join(OUT, "cross-undo.json");
+  await (await crossDownload).saveAs(crossJsonPath);
+  const afterCrossExport = await summary(page);
+  check(
+    "JSON export adds no history entry",
+    afterCrossExport.history.undo === afterStyleToggle.history.undo,
+    `${afterStyleToggle.history.undo} -> ${afterCrossExport.history.undo}`,
+  );
+  await page.locator('[data-testid="import-json-input"]').setInputFiles(crossJsonPath);
+  await page.waitForFunction(
+    (seed) => window.__atlasDebug.getDocument().seed === seed,
+    afterCrossExport.seed,
+    { timeout: 20_000, polling: 100 },
+  );
+  await waitIdle(page);
+  const afterCrossImport = await summary(page);
+  check(
+    "JSON import pushes one history entry",
+    afterCrossImport.history.undo === afterCrossExport.history.undo + 1,
+    `${afterCrossExport.history.undo} -> ${afterCrossImport.history.undo}`,
+  );
+  await page.keyboard.press("Control+z");
+  await waitIdle(page);
+  check(
+    "undo after import returns to the renamed/toggled document",
+    (await page.evaluate(
+      (id) => window.__atlasDebug.getDocument().settlements.find((entry) => entry.id === id)?.name,
+      addedId,
+    )) === "跨功能名" &&
+      (await page.evaluate(() => window.__atlasDebug.getDocument().style.showCompass)) ===
+        !styleBeforeToggle,
+  );
+  await page.keyboard.press("Control+z");
+  await waitIdle(page);
+  check(
+    "undo style toggle restores the previous style",
+    (await page.evaluate(() => window.__atlasDebug.getDocument().style.showCompass)) ===
+      styleBeforeToggle,
+  );
+  await page.keyboard.press("Control+z");
+  await waitIdle(page);
+  check(
+    "undo rename reaches the pre-rename document",
+    (await page.evaluate(
+      (id) => window.__atlasDebug.getDocument().settlements.find((entry) => entry.id === id)?.name,
+      addedId,
+    )) === "雾岭港",
+  );
+
+  // naming: pure generator + UI de-duplication
+  const namingDemo = await page.evaluate(() => window.__atlasDebug.getNamingDemo());
+  check(
+    "pure place-name generator is deterministic for a fixed rng",
+    namingDemo.deterministic[0] === namingDemo.deterministic[1],
+    JSON.stringify(namingDemo.deterministic),
+  );
+  check(
+    "duplicate names receive a stable numeric suffix",
+    namingDemo.deduped === "新港-3",
+    namingDemo.deduped,
+  );
+  await page.locator('[data-testid="place-mode-settlement"]').click();
+  await page.locator('[data-testid="place-kind-select"]').selectOption("town");
+  await page.locator('[data-testid="place-name-input"]').fill("重名港");
+  await page.locator('[data-testid="place-add"]').click();
+  await clickCanvas(page, [0.25, 0.7]);
+  await waitIdle(page);
+  await page.locator('[data-testid="place-name-input"]').fill("重名港");
+  await page.locator('[data-testid="place-add"]').click();
+  await clickCanvas(page, [0.28, 0.73]);
+  await waitIdle(page);
+  const duplicateNames = (await summary(page)).places.list
+    .filter((entry) => entry.name.startsWith("重名港"))
+    .map((entry) => entry.name)
+    .sort();
+  check(
+    "UI auto-suffixes duplicate place names",
+    duplicateNames.includes("重名港") && duplicateNames.includes("重名港-2"),
+    JSON.stringify(duplicateNames),
+  );
+
+  // keyboard / Esc priority / single-source shortcuts
+  await page.locator(`[data-testid="place-list-item-${addedId}"]`).click();
+  await sleep(150);
+  await page.locator('[data-testid="help"]').click();
+  await page.waitForSelector('[data-testid="help-dialog"]');
+  await page.keyboard.press("Escape");
+  await sleep(180);
+  check(
+    "Esc closes the dialog before clearing place selection",
+    (await page.locator('[data-testid="help-dialog"]').count()) === 0 &&
+      (await summary(page)).places.selected?.id === addedId,
+  );
+  await page.keyboard.press("Escape");
+  await sleep(150);
+  check("second Esc clears the place selection", (await summary(page)).places.selected === null);
+  const shortcutIds = await page.evaluate(() =>
+    window.__atlasDebug.getShortcuts().map((entry) => entry.id),
+  );
+  await page.locator('[data-testid="help"]').click();
+  await page.waitForSelector('[data-testid="help-dialog"]');
+  const helpRows = await page.locator('[data-testid="help-dialog"] .shortcut-table tr').count();
+  check(
+    "HelpDialog renders the single-source shortcut list",
+    helpRows === shortcutIds.length &&
+      shortcutIds.includes("undo") &&
+      shortcutIds.includes("escape"),
+    `${helpRows} rows / ${shortcutIds.length} defs`,
+  );
+  await page.keyboard.press("Escape");
+  await sleep(150);
+  await page.keyboard.press("v");
+
   // ── 6d. seed round-trip keeps place edits ───────────────────────────
   const placesBeforeSeed = await summary(page);
   const userSettlementsBefore = placesBeforeSeed.places.userSettlements;
@@ -1074,12 +1419,33 @@ async function main() {
   await page.waitForSelector('[data-testid="export-dialog"]', { timeout: 10_000 });
   await screenshot(page, "08-export-dialog.png");
   await page.locator('[data-testid="export-size-1024"]').click();
+  check(
+    "export dialog previews the final filename under export-filename",
+    /^atlas-.+-20261018-parchment-1024\.png$/.test(
+      (await page.locator('[data-testid="export-filename"]').innerText()).trim(),
+    ),
+    await page.locator('[data-testid="export-filename"]').innerText(),
+  );
+  check(
+    "export dialog exposes an export-size-summary row",
+    (await page.locator('[data-testid="export-size-summary"]').innerText()).includes("1024"),
+  );
+  check(
+    "export button reflects the selected size",
+    (await page.locator('[data-testid="export-png"]').innerText()).includes("1024"),
+    await page.locator('[data-testid="export-png"]').innerText(),
+  );
   const pngDownloadPromise = page.waitForEvent("download", { timeout: 120_000 });
   await page.locator('[data-testid="export-start"]').click();
   const pngDownload = await pngDownloadPromise;
   const pngPath = join(OUT, "exported-1024.png");
   await pngDownload.saveAs(pngPath);
   const png = readFileSync(pngPath);
+  check(
+    "PNG filename follows atlas-<world>-<seed>-<preset>-<size>.png",
+    /^atlas-.+-20261018-parchment-1024\.png$/.test(pngDownload.suggestedFilename()),
+    pngDownload.suggestedFilename(),
+  );
   check(
     "local PNG export downloads a valid PNG",
     png.length > 20_000 && png[0] === 0x89 && png[1] === 0x50 && png[2] === 0x4e && png[3] === 0x47,
@@ -1094,6 +1460,56 @@ async function main() {
   );
   await screenshot(page, "09-export-success.png");
   await page.locator('[data-testid="export-dialog-close"]').click();
+
+  // ── 9b. export UX: progress, cancellation, disabled reasons ────────
+  log("export UX");
+  await page.locator('[data-testid="export-png"]').click();
+  await page.waitForSelector('[data-testid="export-dialog"]');
+  await page.locator('[data-testid="export-size-4096"]').click();
+  check(
+    "export button reflects the large size too",
+    (await page.locator('[data-testid="export-png"]').innerText()).includes("4096"),
+    await page.locator('[data-testid="export-png"]').innerText(),
+  );
+  const cancelledDownload = page
+    .waitForEvent("download", { timeout: 1500 })
+    .catch(() => null);
+  await page.locator('[data-testid="export-start"]').click();
+  await page.waitForSelector('[data-testid="export-progress"]', { timeout: 10_000 });
+  await sleep(600);
+  const progressStage = await page.locator('[data-testid="export-progress-stage"]').innerText();
+  const progressPercent = await page.locator('[data-testid="export-progress-percent"]').innerText();
+  check(
+    "server export shows staged progress with a percentage",
+    progressStage.length > 0 && /%$/.test(progressPercent.trim()),
+    `${progressStage} ${progressPercent}`,
+  );
+  await screenshot(page, "17-export-progress.png");
+  await page.locator('[data-testid="export-cancel-running"]').click();
+  await page.waitForSelector('[data-testid="export-cancelled"]', { timeout: 8_000 });
+  check("cancelling a server export returns to idle", true);
+  const lateDownload = await cancelledDownload;
+  check("cancelled export produces no download", lateDownload === null);
+  await page.locator('[data-testid="export-size-2048"]').click();
+  await page.locator('[data-testid="export-dialog-close"]').click();
+  await sleep(150);
+
+  // disabled reason while a generation is in flight
+  await page.locator('[data-testid="reroll"]').click();
+  await page.locator('[data-testid="export-png"]').click();
+  await page.waitForSelector('[data-testid="export-dialog"]');
+  const disabledReason = await page
+    .locator('[data-testid="export-disabled-reason"]')
+    .innerText()
+    .catch(() => "");
+  check(
+    "export explains a disabled start while generating",
+    disabledReason.includes("生成"),
+    disabledReason || "(missing)",
+  );
+  await page.locator('[data-testid="export-dialog-close"]').click();
+  await waitIdle(page);
+
 
   // ── 10. backend render sanity (small size, direct API) ─────────────
   const apiStatus = await page.evaluate(async () => {
@@ -1246,6 +1662,130 @@ async function main() {
     `hiddenIds=${JSON.stringify(await page.evaluate(() => window.__atlasDebug.getDocument().overrides.hiddenIds))} settlements=${legacySummary.places.userSettlements}`,
   );
 
+
+  // ── 12c. import failure paths + autosave recovery ───────────────────
+  log("import failure + autosave recovery");
+  const seedBeforeBadImport = (await summary(page)).seed;
+  const badJsonPath = join(OUT, "bad-world.json");
+  writeFileSync(badJsonPath, "{ this is not valid json");
+  await page.locator('[data-testid="import-json-input"]').setInputFiles(badJsonPath);
+  await page.waitForSelector('[data-testid="toast"][data-kind="error"]', { timeout: 10_000 });
+  const badToast = await page.locator('[data-testid="toast"]').innerText();
+  check(
+    "bad JSON import shows a readable error toast",
+    badToast.includes("导入失败") || badToast.includes("JSON"),
+    badToast.replace(/\n/g, " | ").slice(0, 180),
+  );
+  check(
+    "bad JSON import keeps the current document",
+    (await summary(page)).seed === seedBeforeBadImport,
+  );
+  await screenshot(page, "15-import-error.png");
+  const badVersionPath = join(OUT, "bad-version.json");
+  writeFileSync(badVersionPath, JSON.stringify({ version: 7, seed: 1 }));
+  await page.locator('[data-testid="import-json-input"]').setInputFiles(badVersionPath);
+  await sleep(700);
+  check(
+    "unsupported world version is rejected without replacing the document",
+    (await summary(page)).seed === seedBeforeBadImport,
+  );
+
+  // localStorage quota failure → save error toast with an export-backup action
+  log("autosave quota failure");
+  await page.evaluate(() => {
+    window.__originalSetItem = Storage.prototype.setItem;
+    Storage.prototype.setItem = function patchedSetItem() {
+      throw new DOMException("Quota exceeded", "QuotaExceededError");
+    };
+  });
+  await page.locator('[data-testid="style-showGraticule"]').click();
+  await page.waitForFunction(
+    () => window.__atlasDebug.getSummary().save.phase === "error",
+    undefined,
+    { timeout: 15_000, polling: 100 },
+  );
+  check(
+    "quota failure surfaces a save error with a backup action",
+    (await page.locator('[data-testid="toast-action"]').count()) === 1 &&
+      (await page.locator('[data-testid="save-status"]').innerText()).includes("失败"),
+  );
+  const backupDownloadPromise = page.waitForEvent("download", { timeout: 20_000 });
+  await page.locator('[data-testid="toast-action"]').click();
+  const backupDownload = await backupDownloadPromise;
+  check(
+    "quota failure offers an immediate JSON backup download",
+    backupDownload.suggestedFilename().endsWith(".world.json"),
+    backupDownload.suggestedFilename(),
+  );
+  await page.evaluate(() => {
+    if (window.__originalSetItem) Storage.prototype.setItem = window.__originalSetItem;
+  });
+  // restore a healthy save state so later reloads do not read a stale error
+  await page.locator('[data-testid="style-showGraticule"]').click();
+  await page.waitForFunction(
+    () => window.__atlasDebug.getSummary().save.phase === "saved",
+    undefined,
+    { timeout: 20_000, polling: 150 },
+  );
+  await waitIdle(page);
+
+  // corrupted autosave: recovery panel, backup restore, no silent overwrite
+  log("corrupted autosave recovery");
+  const backupDocument = JSON.parse(readFileSync(jsonPath, "utf8"));
+  const backupPayload = JSON.stringify({
+    version: 1,
+    savedAt: Date.now() - 60_000,
+    document: backupDocument,
+  });
+  const recoveryContext = await browser.newContext({
+    viewport: { width: 1680, height: 1000 },
+  });
+  await recoveryContext.addInitScript((payload) => {
+    try {
+      localStorage.setItem("atlas_forge.world.v1", "{corrupted-json");
+      localStorage.setItem("atlas_forge.world.backup.v1", payload);
+    } catch {
+      // ignore
+    }
+  }, backupPayload);
+  const recoveryPage = await recoveryContext.newPage();
+  recoveryPage.on("console", (message) => {
+    if (message.type() === "error") consoleErrors.push(`recovery: ${message.text()}`);
+  });
+  recoveryPage.on("pageerror", (error) => pageErrors.push(`recovery: ${String(error)}`));
+  await recoveryPage.goto(WEB_URL, { waitUntil: "domcontentloaded" });
+  await recoveryPage.waitForSelector('[data-testid="autosave-recovery"]', {
+    timeout: 30_000,
+  });
+  check(
+    "corrupted autosave opens the recovery panel",
+    (await recoveryPage.locator('[data-testid="autosave-recover"]').count()) === 1,
+  );
+  await recoveryPage.waitForTimeout(1800);
+  const mainStillCorrupt = await recoveryPage.evaluate(() =>
+    localStorage.getItem("atlas_forge.world.v1"),
+  );
+  check(
+    "corrupted autosave is not silently overwritten",
+    mainStillCorrupt === "{corrupted-json",
+    String(mainStillCorrupt).slice(0, 40),
+  );
+  await recoveryPage.screenshot({ path: join(OUT, "16-autosave-recovery.png") });
+  await recoveryPage.locator('[data-testid="autosave-recover"]').click();
+  await recoveryPage.waitForFunction(() => Boolean(window.__atlasDebug), undefined, {
+    timeout: 20_000,
+  });
+  await waitIdle(recoveryPage);
+  const recovered = await summary(recoveryPage);
+  check(
+    "recovering the previous autosave restores the world",
+    recovered.seed === backupDocument.seed &&
+      recovered.places.userSettlements === backupDocument.settlements.length &&
+      (await recoveryPage.locator('[data-testid="autosave-recovery"]').count()) === 0,
+    `seed=${recovered.seed} settlements=${recovered.places.userSettlements}`,
+  );
+  await recoveryContext.close();
+
   // ── 13. dialogs & shortcuts ────────────────────────────────────────
   await page.locator('[data-testid="help"]').click();
   await page.waitForSelector('[data-testid="help-dialog"]', { timeout: 10_000 });
@@ -1271,6 +1811,175 @@ async function main() {
   check("shortcut F fits the map", (await summary(page)).view.scale > 0);
   check("undo stack still healthy", (await summary(page)).history.undo > 0, `elevation stamps=${undoBeforeShortcut}`);
 
+
+  // ── 14. collapsible layout persistence ─────────────────────────────
+  log("collapsible layout");
+  await page.waitForFunction(
+    () => window.__atlasDebug.getSummary().save.phase === "saved",
+    undefined,
+    { timeout: 15_000, polling: 150 },
+  );
+  await page.locator('[data-testid="group-params"] .panel-group-head').click();
+  await sleep(220);
+  check(
+    "collapsing a section hides its body",
+    (await page.locator('[data-testid="group-params"] .panel-group-body').count()) === 0,
+  );
+  await page.reload({ waitUntil: "domcontentloaded" });
+  await page.waitForFunction(() => Boolean(window.__atlasDebug), undefined, { timeout: 20_000 });
+  await waitIdle(page);
+  const collapsedAfterReload = await page
+    .locator('[data-testid="group-params"] .panel-group-head')
+    .getAttribute("aria-expanded");
+  check(
+    "collapsed state persists across reloads",
+    collapsedAfterReload === "false",
+    `aria-expanded=${collapsedAfterReload}`,
+  );
+  await screenshot(page, "19-collapsed-layout.png");
+  await page.locator('[data-testid="group-params"] .panel-group-head').click();
+  await sleep(220);
+  check(
+    "re-expanding a section restores its body",
+    (await page.locator('[data-testid="group-params"] .panel-group-body').count()) === 1,
+  );
+
+  // ── 15. accessibility ──────────────────────────────────────────────
+  log("accessibility");
+  const ariaLabels = await page.evaluate(() => {
+    const ids = ["reroll", "undo", "redo", "help", "zoom-in", "zoom-out"];
+    return ids.map((id) => {
+      const element = document.querySelector(`[data-testid="${id}"]`);
+      return { id, label: element?.getAttribute("aria-label") ?? null };
+    });
+  });
+  check(
+    "icon buttons expose aria-labels",
+    ariaLabels.every((entry) => typeof entry.label === "string" && entry.label.length > 0),
+    JSON.stringify(ariaLabels),
+  );
+  const statusA11y = await page.evaluate(() => {
+    const status = document.querySelector('[data-testid="status"]');
+    return { role: status?.getAttribute("role"), live: status?.getAttribute("aria-live") };
+  });
+  check(
+    "status text announces changes via aria-live",
+    statusA11y.live === "polite",
+    JSON.stringify(statusA11y),
+  );
+  await page.keyboard.press("4");
+  await sleep(150);
+  const firstListItem = page.locator('[data-testid^="place-list-item-"]').first();
+  await firstListItem.focus();
+  await page.keyboard.press("Enter");
+  await sleep(220);
+  check(
+    "place list is keyboard reachable and Enter selects",
+    (await summary(page)).places.selected !== null,
+    JSON.stringify((await summary(page)).places.selected),
+  );
+  await page.locator('[data-testid="reset-all-params"]').click();
+  await page.locator('[data-testid="reset-all-params"]').click();
+  await sleep(250);
+  check(
+    "duplicate toasts collapse into a single toast",
+    (await page.locator('[data-testid="toast"]').count()) <= 1,
+  );
+
+  // ── 16. reduced motion ────────────────────────────────────────────
+  log("reduced motion");
+  const reducedContext = await browser.newContext({
+    viewport: { width: 1680, height: 1000 },
+    reducedMotion: "reduce",
+  });
+  const reducedPage = await reducedContext.newPage();
+  reducedPage.on("console", (message) => {
+    if (message.type() === "error") consoleErrors.push(`reduced-motion: ${message.text()}`);
+  });
+  reducedPage.on("pageerror", (error) => pageErrors.push(`reduced-motion: ${String(error)}`));
+  await reducedPage.goto(WEB_URL, { waitUntil: "domcontentloaded" });
+  await reducedPage.waitForSelector('[data-testid="map-canvas"]', { timeout: 30_000 });
+  const reducedTransition = await reducedPage.evaluate(
+    () => getComputedStyle(document.querySelector(".btn")).transitionDuration,
+  );
+  check(
+    "prefers-reduced-motion disables transitions",
+    Number.parseFloat(reducedTransition) < 0.01,
+    reducedTransition,
+  );
+  await reducedContext.close();
+
+  // ── 17. narrow desktop layouts: 1280×800 and 1024×768 ─────────────
+  log("responsive layouts");
+  for (const viewport of [
+    { width: 1280, height: 800 },
+    { width: 1024, height: 768 },
+  ]) {
+    const narrowContext = await browser.newContext({ viewport });
+    const narrowPage = await narrowContext.newPage();
+    narrowPage.on("console", (message) => {
+      if (message.type() === "error") {
+        consoleErrors.push(`${viewport.width}px console: ${message.text()}`);
+      }
+    });
+    narrowPage.on("pageerror", (error) =>
+      pageErrors.push(`${viewport.width}px pageerror: ${String(error)}`),
+    );
+    await narrowPage.goto(WEB_URL, { waitUntil: "domcontentloaded" });
+    await narrowPage.waitForSelector('[data-testid="map-canvas"]', { timeout: 30_000 });
+    await narrowPage.waitForFunction(() => Boolean(window.__atlasDebug), undefined, {
+      timeout: 20_000,
+    });
+    await narrowPage.waitForFunction(
+      () => {
+        const data = window.__atlasDebug.getSummary();
+        return data.ready && data.hitBoxesSource !== null;
+      },
+      undefined,
+      { timeout: 60_000, polling: 120 },
+    );
+    const metrics = await narrowPage.evaluate(() => {
+      const canvas = document.querySelector('[data-testid="map-canvas"]');
+      const rect = canvas.getBoundingClientRect();
+      const scrolling = document.scrollingElement;
+      return {
+        innerWidth: window.innerWidth,
+        innerHeight: window.innerHeight,
+        scrollWidth: scrolling.scrollWidth,
+        scrollHeight: scrolling.scrollHeight,
+        canvas: { width: rect.width, height: rect.height },
+        topbarHeight: document.querySelector(".topbar")?.getBoundingClientRect().height ?? 0,
+      };
+    });
+    check(
+      `no page overflow at ${viewport.width}×${viewport.height}`,
+      metrics.scrollWidth <= metrics.innerWidth + 1 &&
+        metrics.scrollHeight <= metrics.innerHeight + 1,
+      JSON.stringify(metrics),
+    );
+    check(
+      `canvas stays usable at ${viewport.width}×${viewport.height}`,
+      metrics.canvas.width > 220 && metrics.canvas.height > 250,
+      JSON.stringify(metrics.canvas),
+    );
+    await narrowPage.screenshot({ path: join(OUT, `20-narrow-${viewport.width}.png`) });
+    await narrowContext.close();
+  }
+
+  const finalPerf = await summary(page);
+  check(
+    "polish does not regress generation/render budgets (sanity)",
+    (finalPerf.perf.lastGenerationMs ?? 0) < 2000 &&
+      (finalPerf.perf.lastRenderMs ?? 0) < 500 &&
+      finalPerf.hitBoxCount > 0,
+    JSON.stringify(finalPerf.perf),
+  );
+  log(
+    `performance snapshot: ${JSON.stringify(finalPerf.perf)} hitBoxes=${finalPerf.hitBoxCount} places=${
+      finalPerf.places.visibleSettlements + finalPerf.places.visibleLabels
+    }`,
+  );
+
   await screenshot(page, "13-final.png");
 
   // ── report ─────────────────────────────────────────────────────────
@@ -1284,6 +1993,14 @@ async function main() {
     pageErrors,
     failedRequests,
     httpErrors,
+    performance: finalPerf
+      ? {
+          ...finalPerf.perf,
+          hitBoxCount: finalPerf.hitBoxCount,
+          visiblePlaces: finalPerf.places.visibleSettlements + finalPerf.places.visibleLabels,
+          places: finalPerf.places,
+        }
+      : null,
     notes,
   };
   writeFileSync(join(OUT, "report.json"), JSON.stringify(report, null, 2));

@@ -328,19 +328,61 @@ const LABEL_SUFFIXES: Record<LabelKind, string[]> = {
   custom: ["地", "境"],
 };
 
-function pick<T>(items: T[]): T {
-  return items[Math.floor(Math.random() * items.length)];
+/** Injectable random source so naming stays a pure, testable function. */
+export type RandomSource = () => number;
+
+function pickWith<T>(items: T[], rng: RandomSource): T {
+  const raw = rng();
+  const normalized = Number.isFinite(raw) ? Math.min(0.999999, Math.max(0, raw)) : 0;
+  return items[Math.floor(normalized * items.length)];
 }
 
-export function generatePlaceName(entity: PlaceEntity, type: SettlementKind | LabelKind): string {
+/**
+ * Pure place-name generator: for identical (entity, type, rng sequence) it
+ * always returns the same name. `Math.random` is the default source.
+ */
+export function generatePlaceName(
+  entity: PlaceEntity,
+  type: SettlementKind | LabelKind,
+  rng: RandomSource = Math.random,
+): string {
   if (entity === "settlement") {
-    const prefix = pick(SETTLEMENT_PREFIXES);
-    const suffix = pick(SETTLEMENT_SUFFIXES[type as SettlementKind] ?? SETTLEMENT_SUFFIXES.custom);
+    const prefix = pickWith(SETTLEMENT_PREFIXES, rng);
+    const suffix = pickWith(
+      SETTLEMENT_SUFFIXES[type as SettlementKind] ?? SETTLEMENT_SUFFIXES.custom,
+      rng,
+    );
     return `${prefix}${suffix}`.slice(0, MAX_NAME_LENGTH);
   }
-  const prefix = pick(LABEL_PREFIXES);
-  const suffix = pick(LABEL_SUFFIXES[type as LabelKind] ?? LABEL_SUFFIXES.region);
+  const prefix = pickWith(LABEL_PREFIXES, rng);
+  const suffix = pickWith(LABEL_SUFFIXES[type as LabelKind] ?? LABEL_SUFFIXES.region, rng);
   return `${prefix}${suffix}`.slice(0, MAX_NAME_LENGTH);
+}
+
+/**
+ * Pure de-duplication helper: appends -2, -3, … until the name is free.
+ * Existing entries are compared after trimming.
+ */
+export function uniquePlaceName(base: string, existingNames: Iterable<string>): string {
+  const used = new Set<string>();
+  for (const name of existingNames) {
+    const trimmed = String(name ?? "").trim();
+    if (trimmed) used.add(trimmed);
+  }
+  const trimmed = base.trim().slice(0, MAX_NAME_LENGTH);
+  const fallback = trimmed.length > 0 ? trimmed : "未命名";
+  if (!used.has(fallback)) return fallback;
+  for (let index = 2; index < 1000; index += 1) {
+    const suffix = `-${index}`;
+    const candidate = `${fallback.slice(0, MAX_NAME_LENGTH - suffix.length)}${suffix}`;
+    if (!used.has(candidate)) return candidate;
+  }
+  return `${fallback.slice(0, MAX_NAME_LENGTH - 5)}-${Date.now().toString(36).slice(-4)}`;
+}
+
+/** Collect every visible + hidden place name for de-duplication. */
+export function collectPlaceNames(collections: Pick<PlaceCollections, "visible" | "hidden">): string[] {
+  return [...collections.visible, ...collections.hidden].map((entry) => entry.name);
 }
 
 // ── Entry construction / upsert helpers ──────────────────────────────────

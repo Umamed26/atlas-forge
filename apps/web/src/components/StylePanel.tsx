@@ -12,9 +12,11 @@ import {
   type StyleToggleKey,
 } from "../lib/constants";
 import { countOverrides } from "../lib/documentIO";
+import { UI_PREF_KEYS } from "../lib/uiPrefs";
 import { formatMs, formatPercent } from "../lib/utils";
 import { useWorldStore } from "../state/worldStore";
 import {
+  CollapsibleGroup,
   ScrollHint,
   Section,
   SelectField,
@@ -58,6 +60,12 @@ export function StylePanel() {
       </div>
 
       <div className="panel-scroll" ref={scroll.ref} data-testid="style-scroll">
+        <CollapsibleGroup
+          title="风格预设"
+          icon="✦"
+          storageKey={UI_PREF_KEYS.stylePreset}
+          testId="group-style-preset"
+        >
         <Section title="预设与图题" icon="✦" testId="section-style-title">
           <SelectField
             label="风格预设"
@@ -78,7 +86,14 @@ export function StylePanel() {
           </div>
           <p className="field-hint">在顶栏修改「世界名」会同步更新地图 cartouche 图题。</p>
         </Section>
+        </CollapsibleGroup>
 
+        <CollapsibleGroup
+          title="图层与细节"
+          icon="◫"
+          storageKey={UI_PREF_KEYS.styleDetail}
+          testId="group-style-detail"
+        >
         <Section title="图层开关" icon="◫" testId="section-style-toggles">
           <div className="toggle-stack">
             {STYLE_TOGGLES.map((toggle) => (
@@ -120,7 +135,14 @@ export function StylePanel() {
             />
           ))}
         </Section>
+        </CollapsibleGroup>
 
+        <CollapsibleGroup
+          title="统计与图例"
+          icon="▦"
+          storageKey={UI_PREF_KEYS.styleStats}
+          testId="group-style-stats"
+        >
         <Section title="世界统计" icon="▦" defaultOpen={true} testId="section-stats">
           <div className="stat-list">
             <div className="stat-row">
@@ -185,6 +207,7 @@ export function StylePanel() {
           </ul>
           <p className="section-note">图例色板为界面参考，最终色彩由渲染器决定。</p>
         </Section>
+        </CollapsibleGroup>
       </div>
       <ScrollHint visible={scroll.scrollable && !scroll.atBottom} testId="style-scroll-hint">
         向下滚动查看全部风格设置 ↓

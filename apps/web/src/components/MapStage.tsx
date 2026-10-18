@@ -48,6 +48,7 @@ import {
   SETTLEMENT_KINDS,
   type PlaceEntry,
 } from "../lib/places";
+import { hitTestPlaces, type PlaceHitBox } from "../lib/placeHitTest";
 import { clamp01, formatMs, isEditableTarget } from "../lib/utils";
 import { screenToWorld, useViewStore } from "../state/viewStore";
 import { useWorldStore, type BrushState } from "../state/worldStore";
@@ -574,6 +575,7 @@ export function MapStage() {
   const scale = useViewStore((state) => state.scale);
   const selectedPlace = useWorldStore((state) => state.selectedPlace);
   const placeArmed = useWorldStore((state) => state.placeTool.armed);
+  const hitBoxes = useWorldStore((state) => state.hitBoxes);
 
   // ── draw ────────────────────────────────────────────────────────────
   const draw = useCallback(() => {
@@ -781,22 +783,54 @@ export function MapStage() {
       const hovered = hoveredPlaceRef.current;
       const drag = placeDragRef.current;
 
-      const drawPlaceRing = (entry: PlaceEntry, isSelected: boolean) => {
+      const boxLookup = new Map<string, PlaceHitBox>();
+      for (const box of world.hitBoxes ?? []) {
+        boxLookup.set(`${box.entity}:${box.id}`, box);
+      }
+
+      const drawPlaceHighlight = (entry: PlaceEntry, isSelected: boolean) => {
+        const box = boxLookup.get(`${entry.entity}:${entry.id}`) ?? null;
         const center = toScreen(entry.x, entry.y);
-        const radius = isSelected ? 16 : 12;
+        const pad = 4;
+        let plateAnchorX = center.x;
+        let plateAnchorY = center.y;
         overlayCtx.save();
-        overlayCtx.beginPath();
-        overlayCtx.arc(center.x, center.y, radius, 0, Math.PI * 2);
-        overlayCtx.fillStyle = isSelected
-          ? "rgba(220, 181, 109, 0.24)"
-          : "rgba(220, 181, 109, 0.12)";
-        overlayCtx.fill();
-        overlayCtx.strokeStyle = isSelected
-          ? "rgba(246, 237, 217, 0.95)"
-          : "rgba(220, 181, 109, 0.85)";
-        overlayCtx.lineWidth = isSelected ? 2.2 : 1.4;
-        if (!isSelected) overlayCtx.setLineDash([4, 3]);
-        overlayCtx.stroke();
+        if (box) {
+          // Same-source bbox: image px → screen px (offset + box * zoom).
+          const screenX = offsetX + box.x * viewScale;
+          const screenY = offsetY + box.y * viewScale;
+          const screenW = box.width * viewScale;
+          const screenH = box.height * viewScale;
+          overlayCtx.beginPath();
+          overlayCtx.rect(screenX - pad, screenY - pad, screenW + pad * 2, screenH + pad * 2);
+          overlayCtx.fillStyle = isSelected
+            ? "rgba(220, 181, 109, 0.2)"
+            : "rgba(220, 181, 109, 0.1)";
+          overlayCtx.fill();
+          overlayCtx.strokeStyle = isSelected
+            ? "rgba(246, 237, 217, 0.95)"
+            : "rgba(220, 181, 109, 0.85)";
+          overlayCtx.lineWidth = isSelected ? 2.2 : 1.4;
+          if (!isSelected) overlayCtx.setLineDash([5, 4]);
+          overlayCtx.stroke();
+          plateAnchorX = screenX + screenW;
+          plateAnchorY = screenY;
+          overlayCtx.setLineDash([]);
+        } else {
+          const radius = isSelected ? 16 : 12;
+          overlayCtx.beginPath();
+          overlayCtx.arc(center.x, center.y, radius, 0, Math.PI * 2);
+          overlayCtx.fillStyle = isSelected
+            ? "rgba(220, 181, 109, 0.24)"
+            : "rgba(220, 181, 109, 0.12)";
+          overlayCtx.fill();
+          overlayCtx.strokeStyle = isSelected
+            ? "rgba(246, 237, 217, 0.95)"
+            : "rgba(220, 181, 109, 0.85)";
+          overlayCtx.lineWidth = isSelected ? 2.2 : 1.4;
+          if (!isSelected) overlayCtx.setLineDash([4, 3]);
+          overlayCtx.stroke();
+        }
         overlayCtx.restore();
 
         const labelText = `${placeTypeIcon(entry)} ${entry.name}`;
@@ -805,10 +839,10 @@ export function MapStage() {
         const plateWidth = overlayCtx.measureText(labelText).width + 16;
         const plateHeight = 21;
         const plateX = Math.min(
-          Math.max(8, center.x + radius + 8),
+          Math.max(8, plateAnchorX + 8),
           Math.max(8, cssWidth - plateWidth - 8),
         );
-        const plateY = Math.max(8, center.y - plateHeight - 5);
+        const plateY = Math.max(8, plateAnchorY - plateHeight - 5);
         overlayCtx.fillStyle = isSelected ? "rgba(30, 24, 16, 0.94)" : "rgba(18, 14, 9, 0.88)";
         overlayCtx.strokeStyle = isSelected
           ? "rgba(220, 181, 109, 0.9)"
@@ -824,13 +858,13 @@ export function MapStage() {
         overlayCtx.restore();
       };
 
-      if (selected) drawPlaceRing(selected, true);
+      if (selected) drawPlaceHighlight(selected, true);
       const hoveredIsSelected =
         hovered &&
         world.selectedPlace &&
         hovered.id === world.selectedPlace.id &&
         hovered.entity === world.selectedPlace.entity;
-      if (hovered && !hoveredIsSelected) drawPlaceRing(hovered, false);
+      if (hovered && !hoveredIsSelected) drawPlaceHighlight(hovered, false);
 
       if (drag && drag.moved) {
         const center = toScreen(drag.currentWorld.x, drag.currentWorld.y);
@@ -929,6 +963,7 @@ export function MapStage() {
     baseVersion,
     selectedPlace,
     placeArmed,
+    hitBoxes,
   ]);
 
   useEffect(() => {
@@ -1002,30 +1037,39 @@ export function MapStage() {
     return screenToWorld(x, y, view.scale, view.offsetX, view.offsetY, BASE_RENDER_SIZE);
   };
 
-  /** Distance-based hit test against merged settlement/label positions. The
-   *  radius is screen-space based so it stays usable at every zoom level. */
+  /**
+   * Hit test using the renderer-sourced layout boxes when available (same
+   * coordinates the map was painted with), falling back to marker distances.
+   * Viewport-culled and O(1) bucketed for very crowded maps.
+   */
   const hitTestPlace = (screenX: number, screenY: number): PlaceEntry | null => {
     const state = useWorldStore.getState();
     const view = useViewStore.getState();
+    const canvas = mapCanvasRef.current;
     const mapPx = BASE_RENDER_SIZE * view.scale;
-    if (!(mapPx > 0)) return null;
-    const worldX = (screenX - view.offsetX) / mapPx;
-    const worldY = (screenY - view.offsetY) / mapPx;
+    if (!(mapPx > 0) || !canvas) return null;
+    const cssWidth = canvas.clientWidth;
+    const cssHeight = canvas.clientHeight;
     const visible = collectPlaces(state.document, state.layers).visible;
-    const baseThreshold = 16 / mapPx;
-    let best: PlaceEntry | null = null;
-    let bestScore = Number.POSITIVE_INFINITY;
-    for (const entry of visible) {
-      const limit = entry.entity === "settlement" ? baseThreshold : baseThreshold * 0.9;
-      const distance = Math.hypot(entry.x - worldX, entry.y - worldY);
-      if (distance > limit) continue;
-      const score = distance + (entry.entity === "label" ? baseThreshold * 0.35 : 0);
-      if (score < bestScore) {
-        best = entry;
-        bestScore = score;
-      }
-    }
-    return best;
+    const result = hitTestPlaces({
+      entries: visible,
+      boxes: state.hitBoxes,
+      imagePoint: {
+        x: (screenX - view.offsetX) / view.scale,
+        y: (screenY - view.offsetY) / view.scale,
+      },
+      viewportWorld: {
+        minX: -view.offsetX / mapPx,
+        minY: -view.offsetY / mapPx,
+        maxX: (cssWidth - view.offsetX) / mapPx,
+        maxY: (cssHeight - view.offsetY) / mapPx,
+      },
+      padding: 4 / view.scale,
+      fallbackThresholdWorld: 16 / mapPx,
+      imageSize: BASE_RENDER_SIZE,
+    });
+    state.recordHitTest(result.ms);
+    return result.hit;
   };
 
   const updatePlaceCursor = (hover: PlaceEntry | null) => {
@@ -1320,7 +1364,9 @@ export function MapStage() {
           ref={mapCanvasRef}
           className={`map-canvas ${cursorClass}`}
           data-testid="map-canvas"
-          aria-label="世界地图画布：拖动平移，滚轮缩放"
+          tabIndex={0}
+          role="application"
+          aria-label="世界地图画布：拖动平移，滚轮缩放；Tab 聚焦后可用快捷键"
           onPointerDown={onPointerDown}
           onPointerMove={onPointerMove}
           onPointerUp={onPointerUp}

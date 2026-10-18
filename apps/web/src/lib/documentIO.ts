@@ -26,6 +26,12 @@ import {
 } from "@atlas/core";
 
 import {
+  coreNormalizeWorldDocument,
+  coreParseWorldDocumentJson,
+  formatDocumentIssues,
+  type DocumentIssue,
+} from "./coreDocumentAdapter";
+import {
   GRID_SIZE_OPTIONS,
   MAX_BIOME_STAMPS,
   MAX_ELEVATION_STAMPS,
@@ -39,10 +45,15 @@ import {
 } from "./constants";
 import { clamp, clamp01, downloadBlob, isFiniteNumber, isRecord, slugify, uid } from "./utils";
 
+export type { DocumentIssue } from "./coreDocumentAdapter";
+
 export class DocumentValidationError extends Error {
-  constructor(message: string) {
+  readonly issues: DocumentIssue[];
+
+  constructor(message: string, issues: DocumentIssue[] = []) {
     super(message);
     this.name = "DocumentValidationError";
+    this.issues = issues;
   }
 }
 
@@ -247,10 +258,10 @@ function normalizeLabels(raw: unknown): MapLabel[] {
 // ── Public API ────────────────────────────────────────────────────────────
 
 /**
- * Validate an unknown JSON value and return a complete WorldDocument.
- * Throws DocumentValidationError when the payload is not a version-1 world.
+ * Legacy (web-local) normalizer: validates a version-1 world and merges
+ * defaults. Kept as a fallback while the core document API rolls out.
  */
-export function normalizeDocument(raw: unknown): WorldDocument {
+function normalizeDocumentLegacy(raw: unknown): WorldDocument {
   if (!isRecord(raw)) {
     throw new DocumentValidationError("世界文件必须是一个 JSON 对象");
   }
@@ -288,26 +299,95 @@ export function normalizeDocument(raw: unknown): WorldDocument {
   };
 }
 
-export function parseWorldDocumentJson(text: string): WorldDocument {
+export interface DocumentParseResult {
+  /** Null when the payload cannot be recovered at all (fatal parse error). */
+  document: WorldDocument | null;
+  issues: DocumentIssue[];
+}
+
+/**
+ * Normalize an unknown value, preferring the core implementation when present.
+ * Unlike the throwing wrapper below, this never throws: callers can inspect
+ * `issues` and decide whether to reject or import with warnings.
+ */
+export function normalizeDocumentDetailed(raw: unknown): DocumentParseResult {
+  const coreResult = coreNormalizeWorldDocument(raw);
+  if (coreResult) {
+    return { document: coreResult.document, issues: coreResult.issues };
+  }
+  try {
+    return { document: normalizeDocumentLegacy(raw), issues: [] };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return { document: null, issues: [{ path: "", message, severity: "error" }] };
+  }
+}
+
+/**
+ * Validate an unknown JSON value and return a complete WorldDocument.
+ * Throws DocumentValidationError with readable issues on fatal problems.
+ */
+export function normalizeDocument(raw: unknown): WorldDocument {
+  const result = normalizeDocumentDetailed(raw);
+  const errors = result.issues.filter((issue) => issue.severity === "error");
+  if (!result.document || errors.length > 0) {
+    throw new DocumentValidationError(
+      errors.length > 0 ? formatDocumentIssues(result.issues) : "世界文件无效",
+      result.issues,
+    );
+  }
+  return result.document;
+}
+
+export function parseWorldDocumentJsonDetailed(text: string): DocumentParseResult {
+  const coreResult = coreParseWorldDocumentJson(text);
+  if (coreResult) return { document: coreResult.document, issues: coreResult.issues };
   let parsed: unknown;
   try {
     parsed = JSON.parse(text);
   } catch (error) {
-    throw new DocumentValidationError(
-      `JSON 解析失败：${error instanceof Error ? error.message : String(error)}`,
-    );
+    return {
+      document: null,
+      issues: [
+        {
+          path: "",
+          message: `JSON 解析失败：${error instanceof Error ? error.message : String(error)}`,
+          severity: "error",
+        },
+      ],
+    };
   }
-  return normalizeDocument(parsed);
+  return normalizeDocumentDetailed(parsed);
 }
 
-export async function readWorldDocumentFile(file: File): Promise<WorldDocument> {
-  if (file.size > MAX_IMPORT_BYTES) {
+export function parseWorldDocumentJson(text: string): WorldDocument {
+  const result = parseWorldDocumentJsonDetailed(text);
+  const errors = result.issues.filter((issue) => issue.severity === "error");
+  if (!result.document || errors.length > 0) {
     throw new DocumentValidationError(
-      `文件过大（${(file.size / 1024 / 1024).toFixed(1)} MB），上限 ${MAX_IMPORT_BYTES / 1024 / 1024} MB`,
+      errors.length > 0 ? formatDocumentIssues(result.issues) : "世界文件无效",
+      result.issues,
     );
   }
+  return result.document;
+}
+
+/** Read + validate a user-selected JSON file without throwing on bad data. */
+export async function readWorldDocumentFile(file: File): Promise<DocumentParseResult> {
+  if (file.size > MAX_IMPORT_BYTES) {
+    return {
+      document: null,
+      issues: [
+        {
+          path: "",
+          message: `文件过大（${(file.size / 1024 / 1024).toFixed(1)} MB），上限 ${MAX_IMPORT_BYTES / 1024 / 1024} MB`,
+          severity: "error",
+        },
+      ],
+    };
+  }
   const text = await file.text();
-  return parseWorldDocumentJson(text);
+  return parseWorldDocumentJsonDetailed(text);
 }
 
 export function serializeDocument(document: WorldDocument): string {
@@ -323,6 +403,8 @@ export function exportDocumentJson(document: WorldDocument): string {
 
 // ── Autosave ──────────────────────────────────────────────────────────────
 
+export const BACKUP_STORAGE_KEY = "atlas_forge.world.backup.v1";
+
 interface AutosavePayload {
   version: 1;
   savedAt: number;
@@ -333,44 +415,124 @@ export interface AutosaveResult {
   ok: boolean;
   savedAt: number;
   error?: string;
+  /** Browser may reject even the backup write when storage quota is exhausted. */
+  backupOk?: boolean;
 }
 
+function readRaw(key: string): string | null {
+  try {
+    return localStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+
+function parseAutosavePayload(raw: string | null): { document: WorldDocument; savedAt: number } | null {
+  if (!raw) return null;
+  try {
+    const payload: unknown = JSON.parse(raw);
+    if (!isRecord(payload) || payload.version !== 1) return null;
+    const result = normalizeDocumentDetailed(payload.document);
+    const errors = result.issues.filter((issue) => issue.severity === "error");
+    if (!result.document || errors.length > 0) return null;
+    const savedAt = typeof payload.savedAt === "number" && Number.isFinite(payload.savedAt)
+      ? payload.savedAt
+      : Date.now();
+    return { document: result.document, savedAt };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Persist the current document. The previous main payload is copied to the
+ * backup key first so a corrupted write / manual recovery always has a
+ * fallback snapshot.
+ */
 export function saveAutosave(document: WorldDocument): AutosaveResult {
   const savedAt = Date.now();
+  let backupOk = true;
+  try {
+    const previous = readRaw(STORAGE_KEY);
+    if (previous) localStorage.setItem(BACKUP_STORAGE_KEY, previous);
+  } catch {
+    backupOk = false;
+  }
   try {
     const payload: AutosavePayload = { version: 1, savedAt, document };
     localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
-    return { ok: true, savedAt };
+    return { ok: true, savedAt, backupOk };
   } catch (error) {
     const message =
       error instanceof DOMException && error.name === "QuotaExceededError"
-        ? "浏览器本地存储已满，自动保存失败（可导出 JSON 备份）"
+        ? "浏览器本地存储已满，自动保存失败（可立即导出 JSON 备份）"
         : `自动保存失败：${error instanceof Error ? error.message : String(error)}`;
-    return { ok: false, savedAt, error: message };
+    return { ok: false, savedAt, error: message, backupOk };
   }
 }
 
+export interface AutosaveLoadState {
+  document: WorldDocument | null;
+  /** The main autosave exists but cannot be parsed/normalized. */
+  corrupted: boolean;
+  corruptedMessage: string | null;
+  backupSavedAt: number | null;
+  hasBackup: boolean;
+}
+
+/** Inspect main + backup autosave slots without overwriting anything. */
+export function loadAutosaveState(): AutosaveLoadState {
+  const mainRaw = readRaw(STORAGE_KEY);
+  const backupRaw = readRaw(BACKUP_STORAGE_KEY);
+  const backup = parseAutosavePayload(backupRaw);
+  if (!mainRaw) {
+    return {
+      document: null,
+      corrupted: false,
+      corruptedMessage: null,
+      backupSavedAt: backup?.savedAt ?? null,
+      hasBackup: backup !== null,
+    };
+  }
+  const main = parseAutosavePayload(mainRaw);
+  if (main) {
+    return {
+      document: main.document,
+      corrupted: false,
+      corruptedMessage: null,
+      backupSavedAt: backup?.savedAt ?? null,
+      hasBackup: backup !== null,
+    };
+  }
+  return {
+    document: null,
+    corrupted: true,
+    corruptedMessage: "浏览器自动存档无法解析（可能写入中断或版本过旧）",
+    backupSavedAt: backup?.savedAt ?? null,
+    hasBackup: backup !== null,
+  };
+}
+
+/** Returns the main autosave document when valid (compat helper). */
 export function loadAutosave(): WorldDocument | null {
-  let text: string | null = null;
-  try {
-    text = localStorage.getItem(STORAGE_KEY);
-  } catch {
-    return null;
-  }
-  if (!text) return null;
-  try {
-    const payload: unknown = JSON.parse(text);
-    if (!isRecord(payload) || payload.version !== 1) return null;
-    return normalizeDocument(payload.document);
-  } catch {
-    // Corrupted autosave: discard rather than crash the app.
-    return null;
-  }
+  return loadAutosaveState().document;
 }
 
-export function clearAutosave(): void {
+/** Load the previous good snapshot (used by the recovery panel). */
+export function loadAutosaveBackup(): { document: WorldDocument; savedAt: number } | null {
+  const backup = parseAutosavePayload(readRaw(BACKUP_STORAGE_KEY));
+  return backup ? { document: backup.document, savedAt: backup.savedAt } : null;
+}
+
+export function clearAutosave(includeBackup = true): void {
   try {
     localStorage.removeItem(STORAGE_KEY);
+  } catch {
+    // ignore
+  }
+  if (!includeBackup) return;
+  try {
+    localStorage.removeItem(BACKUP_STORAGE_KEY);
   } catch {
     // ignore
   }

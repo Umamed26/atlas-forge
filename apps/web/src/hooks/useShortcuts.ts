@@ -4,6 +4,8 @@
  */
 import { useEffect, useRef } from "react";
 
+import { focusMapCanvas } from "../lib/focus";
+import { TOOL_SHORTCUTS } from "../lib/shortcuts";
 import { isEditableTarget } from "../lib/utils";
 import { useViewStore } from "../state/viewStore";
 import { useWorldStore } from "../state/worldStore";
@@ -34,19 +36,23 @@ export function useShortcuts(handlers: ShortcutHandlers): void {
         if (closed) return;
         if (world.placeRename) {
           world.cancelPlaceRename();
+          focusMapCanvas();
           return;
         }
         if (world.placeTool.armed) {
           world.disarmPlacement();
+          focusMapCanvas();
           return;
         }
         if (world.selectedPlace) {
           world.selectPlace(null);
+          focusMapCanvas();
           return;
         }
         if (world.riverDraft.points.length > 0) {
           world.clearRiverDraft();
           world.pushToast("info", "已取消河道绘制");
+          focusMapCanvas();
         }
         return;
       }
@@ -73,27 +79,14 @@ export function useShortcuts(handlers: ShortcutHandlers): void {
         return;
       }
 
+      const toolShortcut = TOOL_SHORTCUTS[lower];
+      if (toolShortcut) {
+        event.preventDefault();
+        world.setTool(toolShortcut);
+        return;
+      }
+
       switch (lower) {
-        case "1":
-          event.preventDefault();
-          world.setTool("elevation");
-          break;
-        case "2":
-          event.preventDefault();
-          world.setTool("river");
-          break;
-        case "3":
-          event.preventDefault();
-          world.setTool("biome");
-          break;
-        case "4":
-          event.preventDefault();
-          world.setTool("places");
-          break;
-        case "v":
-          event.preventDefault();
-          world.setTool("pan");
-          break;
         case "f":
           event.preventDefault();
           view.fit();

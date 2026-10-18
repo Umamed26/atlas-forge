@@ -319,23 +319,4 @@ export const EXPORT_PRESETS: ExportPreset[] = [
   { size: 8192, label: "8192²", mode: "server", note: "海报级 · 需要导出服务与你耐心", estimate: "预估 10–30 秒" },
 ];
 
-// ── Human-readable keyboard help ──────────────────────────────────────────
-export const KEYBOARD_SHORTCUTS: { keys: string; action: string }[] = [
-  { keys: "Ctrl / ⌘ + Z", action: "撤销上一步（按笔画/操作快照）" },
-  { keys: "Ctrl / ⌘ + Shift + Z", action: "重做" },
-  { keys: "1 / 2 / 3 / 4", action: "切换海拔 / 河道 / 群系 / 地点工具" },
-  { keys: "V", action: "切换平移工具" },
-  { keys: "Space（按住）", action: "临时进入平移模式" },
-  { keys: "滚轮", action: "以光标为中心缩放地图" },
-  { keys: "+ / −", action: "放大 / 缩小" },
-  { keys: "F", action: "适配窗口" },
-  { keys: "0", action: "1:1 像素还原" },
-  { keys: "Ctrl / ⌘ + Enter", action: "立即按当前文档重新生成" },
-  { keys: "回车 / 双击", action: "完成强制河道折线" },
-  { keys: "双击地点", action: "重命名选中的地点或地名" },
-  { keys: "拖动地点", action: "把地点/地名移动到新位置" },
-  { keys: "Backspace", action: "删除河道最后一个节点" },
-  { keys: "Delete", action: "彻底删除选中的用户新增地点" },
-  { keys: "Esc", action: "取消放置/重命名/选中，或取消河道、关闭弹窗" },
-  { keys: "?", action: "打开本帮助" },
-];
+

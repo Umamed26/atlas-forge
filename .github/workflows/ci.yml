@@ -35,3 +35,6 @@ jobs:
 
       - name: Build web
         run: pnpm -C apps/web build
+
+      - name: Render QA smoke (Node canvas)
+        run: pnpm qa:render

@@ -2,6 +2,7 @@
 import { useEffect, useRef, useState, type ChangeEvent } from "react";
 
 import { STYLE_PRESETS, type StylePresetId } from "../lib/constants";
+import { formatDocumentIssues, countIssues } from "../lib/coreDocumentAdapter";
 import {
   exportDocumentJson,
   readWorldDocumentFile,
@@ -60,6 +61,7 @@ function SeedInput() {
 export function TopBar({ onOpenExport, onOpenHelp }: TopBarProps) {
   const name = useWorldStore((state) => state.document.name);
   const preset = useWorldStore((state) => state.document.style.preset);
+  const exportSize = useWorldStore((state) => state.exportSize);
   const canUndo = useWorldStore((state) => state.historyPast.length > 0);
   const canRedo = useWorldStore((state) => state.historyFuture.length > 0);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -82,10 +84,22 @@ export function TopBar({ onOpenExport, onOpenHelp }: TopBarProps) {
     if (!file) return;
     setImporting(true);
     try {
-      const document = await readWorldDocumentFile(file);
+      const result = await readWorldDocumentFile(file);
       const store = useWorldStore.getState();
-      store.importDocument(document);
+      const errorCount = countIssues(result.issues, "error");
+      if (!result.document || errorCount > 0) {
+        store.pushToast(
+          "error",
+          `导入失败：${formatDocumentIssues(result.issues, 2)}`,
+        );
+        return;
+      }
+      store.importDocument(result.document);
       store.requestPipelineReset();
+      const warningCount = countIssues(result.issues, "warning");
+      if (warningCount > 0) {
+        store.pushToast("info", `已导入并自动修复 ${warningCount} 处字段`);
+      }
     } catch (error) {
       useWorldStore.getState().pushToast(
         "error",
@@ -230,11 +244,11 @@ export function TopBar({ onOpenExport, onOpenHelp }: TopBarProps) {
         <button
           type="button"
           className="btn btn--accent"
-          title="导出 PNG（1024 / 2048 本地，4096 / 8192 走服务端）"
+          title={`导出 PNG · 当前选择 ${exportSize}²（1024/2048 本地，4096/8192 服务端）`}
           data-testid="export-png"
           onClick={onOpenExport}
         >
-          导出 PNG
+          导出 PNG · {exportSize}²
         </button>
         <button
           type="button"

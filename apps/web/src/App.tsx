@@ -1,5 +1,6 @@
 import { useCallback, useRef, useState } from "react";
 
+import { AutosaveRecoveryPanel } from "./components/AutosaveRecoveryPanel";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { ExportDialog } from "./components/ExportDialog";
 import { HelpDialog } from "./components/HelpDialog";
@@ -34,6 +35,7 @@ function AppShell() {
   return (
     <div className="app">
       <TopBar onOpenExport={openExport} onOpenHelp={openHelp} />
+      <AutosaveRecoveryPanel />
       <main className="layout">
         <ParamPanel />
         <MapStage />

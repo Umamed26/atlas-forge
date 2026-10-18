@@ -10,7 +10,7 @@
 import assert from "node:assert/strict";
 import { createCanvas, GlobalFonts } from "@napi-rs/canvas";
 import { createSyntheticWorld, type SyntheticWorld } from "../src/testing";
-import { renderWorld, type Ctx2D, type RenderStats } from "../src/index";
+import { measureMapContent, renderWorld, type Ctx2D, type RenderStats } from "../src/index";
 import { collectLabelDrawables, mergeMapContent } from "../src/labels";
 import { installNodeFonts } from "../src/node-fonts";
 
@@ -368,6 +368,199 @@ async function main(): Promise<void> {
     results.push(
       `settlement merge: hidden removed, pinned override wins (markers=${editedShot.stats.settlements})`,
     );
+  }
+
+  // 10) Hit-testing layout API (`measureMapContent`) — same-source geometry.
+  {
+    const world = createSyntheticWorld({ size: 96, seed: 424242 });
+    const ctx = createCanvas(1024, 1024).getContext("2d") as unknown as Ctx2D;
+    const measure = (document = world.document, layers = world.layers, quality: "preview" | "export" = "preview") =>
+      measureMapContent({ ctx, document, layers, width: 1024, height: 1024, quality });
+    /** True when a small neighbourhood around (u,v) is dry, river-free land. */
+    const interiorLand = (u: number, v: number, radiusU = 0.07, radiusV = 0.035): boolean => {
+      for (let dy = -1; dy <= 1; dy += 1) {
+        for (let dx = -1; dx <= 1; dx += 1) {
+          const cu = u + dx * radiusU;
+          const cv = v + dy * radiusV;
+          if (cu < 0 || cu > 1 || cv < 0 || cv > 1) return false;
+          const cell =
+            Math.min(seaSize - 1, Math.floor(cv * seaSize)) * seaSize +
+            Math.min(seaSize - 1, Math.floor(cu * seaSize));
+          if (world.layers.ocean[cell] || world.layers.lake[cell] || world.layers.river[cell]) {
+            return false;
+          }
+        }
+      }
+      return true;
+    };
+
+    // 10a) Consistency with the painted result / RenderStats counters.
+    const shot = render(world, 1024, 1024, "preview");
+    const measured = measure();
+    const measuredLabels = measured.filter((entry) => entry.entity === "label");
+    const measuredSettlements = measured.filter((entry) => entry.entity === "settlement");
+    assert.equal(measuredSettlements.length, shot.stats.settlements, "settlement count mismatch");
+    assert.equal(
+      measuredLabels.length,
+      shot.stats.labelsDrawn - shot.stats.settlementNames,
+      "plain label count mismatch",
+    );
+    assert.equal(
+      measured.length,
+      shot.stats.labelsDrawn - shot.stats.settlementNames + shot.stats.settlements,
+      "measured total must match the drawn label + marker count",
+    );
+    assert.deepEqual(
+      measured.map((entry) => entry.drawOrder),
+      measured.map((_, index) => index),
+      "drawOrder must be contiguous and ascending (paint order)",
+    );
+    for (const entry of measured) {
+      assert.ok(entry.text.length > 0, `empty text for ${entry.id}`);
+      assert.ok(Number.isFinite(entry.x) && Number.isFinite(entry.y), `bad box for ${entry.id}`);
+      assert.ok(entry.width > 0 && entry.height > 0, `empty box for ${entry.id}`);
+      assert.ok(Math.abs(entry.centerX - (entry.x + entry.width / 2)) < 1e-6);
+      assert.ok(Math.abs(entry.centerY - (entry.y + entry.height / 2)) < 1e-6);
+      assert.ok(entry.x >= -0.001 && entry.y >= -0.001, `${entry.id} outside canvas (top-left)`);
+      assert.ok(
+        entry.x + entry.width <= 1024.001 && entry.y + entry.height <= 1024.001,
+        `${entry.id} outside canvas (bottom-right)`,
+      );
+    }
+    results.push(
+      `measure consistency: ${measuredLabels.length} labels + ${measuredSettlements.length} settlements == RenderStats`,
+    );
+
+    // 10b) Hidden entries never reach the hit-test boxes.
+    const hiddenLabelId = world.layers.autoLabels[1]?.id;
+    const hiddenSettlementId = world.layers.settlements[1]?.id;
+    assert.ok(hiddenLabelId && hiddenSettlementId, "fixture ids missing");
+    const hiddenDoc = {
+      ...world.document,
+      overrides: {
+        ...world.document.overrides,
+        hiddenIds: [hiddenLabelId!, hiddenSettlementId!],
+      },
+    };
+    const hiddenMeasured = measure(hiddenDoc);
+    assert.ok(
+      !hiddenMeasured.some((entry) => entry.id === hiddenLabelId),
+      "hidden label returned by measureMapContent",
+    );
+    assert.ok(
+      !hiddenMeasured.some((entry) => entry.id === hiddenSettlementId && entry.entity === "settlement"),
+      "hidden settlement returned by measureMapContent",
+    );
+    results.push("measure hidden filter: hidden label/settlement omitted");
+
+    // 10c) Sea labels are searched into open water and stay inside the frame.
+    const seaMeasured = measured.find((entry) => entry.id === "l-water-1");
+    assert.ok(seaMeasured, "sea label missing from measured content");
+    assert.ok(
+      seaMeasured!.x >= 0 && seaMeasured!.y >= 0 && seaMeasured!.x + seaMeasured!.width <= 1024,
+      "sea label outside the canvas",
+    );
+    const centerU = seaMeasured!.centerX / 1024;
+    const centerV = seaMeasured!.centerY / 1024;
+    const seaSize = world.layers.size;
+    const seaCellX = Math.min(seaSize - 1, Math.floor(centerU * seaSize));
+    const seaCellY = Math.min(seaSize - 1, Math.floor(centerV * seaSize));
+    assert.equal(
+      world.layers.ocean[seaCellY * seaSize + seaCellX],
+      1,
+      "sea label centre is not over ocean",
+    );
+    results.push(`measure sea label: (${seaMeasured!.centerX.toFixed(0)}, ${seaMeasured!.centerY.toFixed(0)}) in open sea`);
+
+    // 10d) CJK and Latin labels both get positive measurable boxes.
+    const emptyLayers = { ...world.layers, autoLabels: [], settlements: [] };
+    // Pick two deterministic land, non-river positions for the labels.
+    const landPositions: Array<{ x: number; y: number }> = [];
+    for (let gy = 0.3; gy <= 0.75 && landPositions.length < 2; gy += 0.05) {
+      for (let gx = 0.25; gx <= 0.75 && landPositions.length < 2; gx += 0.05) {
+        const farEnough = landPositions.every(
+          (existing) => Math.hypot(existing.x - gx, existing.y - gy) > 0.25,
+        );
+        if (farEnough && interiorLand(gx, gy)) {
+          landPositions.push({ x: gx, y: gy });
+        }
+      }
+    }
+    assert.equal(landPositions.length, 2, "could not find two land positions in fixture");
+    const i18nDoc = {
+      ...world.document,
+      settlements: [],
+      labels: [
+        { id: "measure-cjk", text: "苍茫海域", kind: "region" as const, x: landPositions[0].x, y: landPositions[0].y, size: 1 },
+        { id: "measure-latin", text: "Fresh Latin", kind: "custom" as const, x: landPositions[1].x, y: landPositions[1].y, size: 1 },
+      ],
+    };
+    const i18n = measure(i18nDoc, emptyLayers);
+    const cjk = i18n.find((entry) => entry.id === "measure-cjk");
+    const latin = i18n.find((entry) => entry.id === "measure-latin");
+    assert.ok(cjk && latin, "i18n labels missing from measured content");
+    assert.ok(cjk!.width > 0 && cjk!.height > 0, "CJK label has empty box");
+    assert.ok(latin!.width > 0 && latin!.height > 0, "Latin label has empty box");
+    results.push(`measure i18n: CJK ${cjk!.width.toFixed(0)}x${cjk!.height.toFixed(0)}px, Latin ${latin!.width.toFixed(0)}x${latin!.height.toFixed(0)}px`);
+
+    // 10e) Quality tiers really change the layout (export draws more names).
+    const candidates: Array<{ x: number; y: number }> = [];
+    for (let gy = 0.12; gy <= 0.88 && candidates.length < 40; gy += 0.04) {
+      for (let gx = 0.12; gx <= 0.88 && candidates.length < 40; gx += 0.04) {
+        const cell =
+          Math.min(seaSize - 1, Math.floor(gy * seaSize)) * seaSize +
+          Math.min(seaSize - 1, Math.floor(gx * seaSize));
+        if (
+          !world.layers.ocean[cell] &&
+          !world.layers.lake[cell] &&
+          !world.layers.river[cell]
+        ) {
+          candidates.push({ x: gx, y: gy });
+        }
+      }
+    }
+    const manyDoc = {
+      ...world.document,
+      settlements: [],
+      labels: candidates.map((position, index) => ({
+        id: `quality-label-${index}`,
+        text: `L${index % 10}`,
+        kind: "custom" as const,
+        x: position.x,
+        y: position.y,
+        size: 0.5,
+      })),
+    };
+    const previewMany = measure(manyDoc, emptyLayers, "preview");
+    const exportMany = measure(manyDoc, emptyLayers, "export");
+    assert.ok(previewMany.length > 0, "quality fixture measured no labels in preview");
+    assert.ok(
+      exportMany.length > previewMany.length,
+      `export (${exportMany.length}) should lay out more labels than preview (${previewMany.length})`,
+    );
+    results.push(`measure quality: preview ${previewMany.length} labels, export ${exportMany.length}`);
+
+    // 10f) Repeated calls are stateless / deterministic.
+    const first = JSON.stringify(measure());
+    void render(world, 512, 512, "preview");
+    const second = JSON.stringify(measure());
+    void measure(world.document, world.layers, "export");
+    const third = JSON.stringify(measure());
+    assert.equal(first, second, "measureMapContent leaked state between calls");
+    assert.equal(first, third, "measureMapContent leaked state after an export-quality call");
+    results.push("measure state: repeated calls identical");
+
+    // 10g) Performance budget: <= 8ms for a 1024 preview layout (local).
+    const manyLayers = emptyLayers;
+    for (let i = 0; i < 3; i += 1) measure(manyDoc, manyLayers, "preview");
+    let bestMs = Infinity;
+    for (let i = 0; i < 5; i += 1) {
+      const start = performance.now();
+      measure(manyDoc, manyLayers, "preview");
+      bestMs = Math.min(bestMs, performance.now() - start);
+    }
+    assert.ok(bestMs <= 8, `measureMapContent too slow: ${bestMs.toFixed(2)}ms > 8ms`);
+    results.push(`measure performance: ${bestMs.toFixed(2)}ms @1024 preview (target <= 8ms)`);
   }
 
   void pixelStats;

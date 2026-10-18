@@ -1,5 +1,6 @@
 /** Help dialog: workflow, brush semantics, shortcuts, data model. */
-import { KEYBOARD_SHORTCUTS, TOOLS } from "../lib/constants";
+import { TOOLS } from "../lib/constants";
+import { SHORTCUTS } from "../lib/shortcuts";
 import { Kbd, Modal } from "./ui";
 
 export interface HelpDialogProps {
@@ -83,7 +84,7 @@ export function HelpDialog({ open, onClose }: HelpDialogProps) {
           <h3>快捷键</h3>
           <table className="shortcut-table">
             <tbody>
-              {KEYBOARD_SHORTCUTS.map((shortcut) => (
+              {SHORTCUTS.map((shortcut) => (
                 <tr key={shortcut.keys}>
                   <td>
                     <Kbd>{shortcut.keys}</Kbd>

@@ -19,7 +19,8 @@ export type ExportErrorKind =
   | "format"
   | "render"
   | "worker"
-  | "unsupported";
+  | "unsupported"
+  | "cancelled";
 
 export class ExportError extends Error {
   readonly kind: ExportErrorKind;
@@ -52,8 +53,27 @@ export interface ExportResult {
 
 export type ExportProgress = (update: ProgressUpdate) => void;
 
+/**
+ * `atlas-<world>-<seed>-<preset>-<size>.png`, with illegal filename characters
+ * stripped by slugify. Falls back to "world" for empty names.
+ */
 export function pngFilename(document: WorldDocument, size: number): string {
-  return `${slugify(document.name)}-${document.seed}-${size}.png`;
+  const world = slugify(document.name) || "world";
+  const preset = document.style?.preset === "aged-ink" ? "aged-ink" : "parchment";
+  return `atlas-${world}-${document.seed}-${preset}-${size}.png`;
+}
+
+export interface ExportRunOptions {
+  /** Cancels a local worker / aborts the server fetch. */
+  signal?: AbortSignal;
+}
+
+function cancellationError(): ExportError {
+  return new ExportError("cancelled", "已取消导出");
+}
+
+function throwIfAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) throw cancellationError();
 }
 
 function localSimSize(document: WorldDocument): number {
@@ -94,8 +114,14 @@ function exportWithWorker(
   document: WorldDocument,
   size: number,
   onProgress?: ExportProgress,
+  options: ExportRunOptions = {},
 ): Promise<ExportResult> {
   return new Promise((resolve, reject) => {
+    const signal = options.signal;
+    if (signal?.aborted) {
+      reject(cancellationError());
+      return;
+    }
     const taskId = ++exportTaskCounter;
     let worker: Worker;
     try {
@@ -119,14 +145,20 @@ function exportWithWorker(
       reject(new ExportError("timeout", "本地导出超时（90 秒），请尝试更小的尺寸", null));
     }, 90_000);
 
+    const onAbort = () => {
+      cleanup();
+      reject(cancellationError());
+    };
     const cleanup = () => {
       if (settled) return;
       settled = true;
       window.clearTimeout(timeout);
+      signal?.removeEventListener("abort", onAbort);
       worker.onmessage = null;
       worker.onerror = null;
       worker.terminate();
     };
+    signal?.addEventListener("abort", onAbort, { once: true });
 
     worker.onmessage = (event: MessageEvent<WorkerReply>) => {
       const message = event.data;
@@ -183,9 +215,11 @@ async function exportOnMainThread(
   document: WorldDocument,
   size: number,
   onProgress?: ExportProgress,
+  options: ExportRunOptions = {},
 ): Promise<ExportResult> {
   // Yield once so the dialog can paint its progress state before we block.
   await new Promise((resolve) => window.setTimeout(resolve, 40));
+  throwIfAborted(options.signal);
   const startedAt = performance.now();
   const pipeline = createPipeline();
   const layers: WorldLayers = pipeline.generate({
@@ -199,8 +233,12 @@ async function exportOnMainThread(
     progress: 0.95,
     elapsedMs: performance.now() - startedAt,
   });
+  throwIfAborted(options.signal);
   const canvas = renderMapToCanvas(layers, document, size, "export");
   const blob = await canvasToBlob(canvas);
+  // Release the detached canvas bitmap as soon as the blob exists.
+  canvas.width = 0;
+  canvas.height = 0;
   return {
     blob,
     meta: {
@@ -228,24 +266,27 @@ export async function exportLocalPng(
   document: WorldDocument,
   size: number,
   onProgress?: ExportProgress,
+  options: ExportRunOptions = {},
 ): Promise<ExportResult> {
+  throwIfAborted(options.signal);
   if (typeof Worker !== "undefined") {
     try {
-      return await exportWithWorker(document, size, onProgress);
+      return await exportWithWorker(document, size, onProgress, options);
     } catch (error) {
       if (error instanceof ExportError && error.kind === "unsupported") {
-        return exportOnMainThread(document, size, onProgress);
+        return exportOnMainThread(document, size, onProgress, options);
       }
       throw error;
     }
   }
-  return exportOnMainThread(document, size, onProgress);
+  return exportOnMainThread(document, size, onProgress, options);
 }
 
 // ── Server (Node backend) export ──────────────────────────────────────────
 
 export interface ServerExportOptions {
   timeoutMs?: number;
+  signal?: AbortSignal;
 }
 
 export async function exportServerPng(
@@ -255,6 +296,10 @@ export async function exportServerPng(
 ): Promise<ExportResult> {
   const timeoutMs = options.timeoutMs ?? (size >= 8192 ? 180_000 : 120_000);
   const controller = new AbortController();
+  const userSignal = options.signal;
+  if (userSignal?.aborted) throw cancellationError();
+  const onUserAbort = () => controller.abort();
+  userSignal?.addEventListener("abort", onUserAbort, { once: true });
   const timer = window.setTimeout(() => controller.abort(), timeoutMs);
   const startedAt = performance.now();
   let response: Response;
@@ -266,6 +311,9 @@ export async function exportServerPng(
       signal: controller.signal,
     });
   } catch (error) {
+    if (userSignal?.aborted) {
+      throw cancellationError();
+    }
     if (controller.signal.aborted) {
       throw new ExportError(
         "timeout",
@@ -280,6 +328,7 @@ export async function exportServerPng(
     );
   } finally {
     window.clearTimeout(timer);
+    userSignal?.removeEventListener("abort", onUserAbort);
   }
 
   if (!response.ok) {

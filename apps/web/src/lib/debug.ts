@@ -7,7 +7,14 @@
  */
 import { BASE_RENDER_SIZE } from "./constants";
 import { countOverrides } from "./documentIO";
-import { collectPlaces, type PlaceEntry } from "./places";
+import { collectPlaces, generatePlaceName, uniquePlaceName, type PlaceEntry } from "./places";
+import {
+  hitTestPlaces,
+  placeHitBoxesForDebug,
+  type PlaceHitBox,
+  type PlaceHitBoxDebugInfo,
+} from "./placeHitTest";
+import { getShortcutList, type ShortcutDef } from "./shortcuts";
 import { useViewStore } from "../state/viewStore";
 import { useWorldStore } from "../state/worldStore";
 
@@ -54,6 +61,15 @@ export interface AtlasDebugSummary {
   save: { phase: string; savedAt: number | null; error: string | null };
   server: { phase: string; latencyMs: number | null; maxSize: number | null };
   autosaveRestored: boolean;
+  exportSize: number;
+  hitBoxesSource: string | null;
+  hitBoxCount: number;
+  perf: {
+    hitTestMs: number | null;
+    lastGenerationMs: number | null;
+    lastRenderMs: number | null;
+  };
+  autosaveRecovery: { pending: boolean; hasBackup: boolean } | null;
   places: {
     selected: { id: string; entity: string } | null;
     renaming: { id: string; entity: string } | null;
@@ -81,6 +97,23 @@ export interface AtlasDebugApi {
   fit: () => void;
   zoom: (factor: number) => void;
   oneToOne: () => void;
+  /** Renderer-sourced (or marker-fallback) place boxes, image/world/screen. */
+  getPlaceHitBoxes: () => PlaceHitBoxDebugInfo[];
+  /** Single-source keyboard shortcut list (also drives HelpDialog). */
+  getShortcuts: () => ShortcutDef[];
+  /** Deterministic naming demo for E2E / README parity checks. */
+  getNamingDemo: () => {
+    deterministic: string[];
+    deduped: string;
+    randomSample: string;
+  };
+  /** Pure hit-priority probe using the same hitTestPlaces function as the UI. */
+  testHitPriority: () => {
+    hitId: string | null;
+    usedBoxes: boolean;
+    candidates: number;
+    ms: number;
+  };
 }
 
 declare global {
@@ -166,6 +199,17 @@ function buildSummary(): AtlasDebugSummary {
       maxSize: state.server.maxSize,
     },
     autosaveRestored: state.restoredFromAutosave,
+    exportSize: state.exportSize,
+    hitBoxesSource: state.hitBoxesSource,
+    hitBoxCount: state.hitBoxes?.length ?? 0,
+    perf: {
+      hitTestMs: state.perf.hitTestMs,
+      lastGenerationMs: state.perf.lastGenerationMs,
+      lastRenderMs: state.perf.lastRenderMs,
+    },
+    autosaveRecovery: state.autosaveRecovery
+      ? { pending: true, hasBackup: state.autosaveRecovery.hasBackup }
+      : null,
     places: {
       selected: state.selectedPlace ? { ...state.selectedPlace } : null,
       renaming: state.placeRename ? { ...state.placeRename } : null,
@@ -205,6 +249,73 @@ export function installDebugApi(): void {
     fit: () => useViewStore.getState().fit(),
     zoom: (factor: number) => useViewStore.getState().zoomBy(factor),
     oneToOne: () => useViewStore.getState().oneToOne(),
+    getPlaceHitBoxes: () => {
+      const state = useWorldStore.getState();
+      const view = useViewStore.getState();
+      const boxes = state.hitBoxes ?? [];
+      return placeHitBoxesForDebug(
+        boxes,
+        { scale: view.scale, offsetX: view.offsetX, offsetY: view.offsetY },
+        BASE_RENDER_SIZE,
+      );
+    },
+    getShortcuts: () => getShortcutList(),
+    getNamingDemo: () => {
+      const fixedRng = () => 0.42;
+      return {
+        deterministic: [
+          generatePlaceName("settlement", "port", fixedRng),
+          generatePlaceName("settlement", "port", fixedRng),
+          generatePlaceName("label", "water", fixedRng),
+        ],
+        deduped: uniquePlaceName("新港", ["新港", "新港-2"]),
+        randomSample: generatePlaceName("settlement", "city"),
+      };
+    },
+    testHitPriority: () => {
+      const entries = [
+        {
+          id: "low-box",
+          entity: "label" as const,
+          name: "低层",
+          type: "custom" as const,
+          x: 0.5,
+          y: 0.5,
+          pinned: true,
+          userAdded: false,
+          hidden: false,
+        },
+        {
+          id: "high-box",
+          entity: "label" as const,
+          name: "顶层",
+          type: "custom" as const,
+          x: 0.5,
+          y: 0.5,
+          pinned: true,
+          userAdded: false,
+          hidden: false,
+        },
+      ];
+      const boxes: PlaceHitBox[] = [
+        { id: "low-box", entity: "label", x: 480, y: 490, width: 40, height: 20, drawOrder: 3 },
+        { id: "high-box", entity: "label", x: 490, y: 495, width: 40, height: 20, drawOrder: 9 },
+      ];
+      const result = hitTestPlaces({
+        entries,
+        boxes,
+        imagePoint: { x: 500, y: 500 },
+        viewportWorld: { minX: 0, minY: 0, maxX: 1, maxY: 1 },
+        padding: 4,
+        fallbackThresholdWorld: 0.02,
+      });
+      return {
+        hitId: result.hit?.id ?? null,
+        usedBoxes: result.usedBoxes,
+        candidates: result.candidates,
+        ms: result.ms,
+      };
+    },
   };
   window.__atlasDebug = api;
   window.__atlas = api;

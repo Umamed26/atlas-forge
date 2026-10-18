@@ -17,6 +17,11 @@ import {
 import { installDebugApi } from "../lib/debug";
 import { loadRenderFonts } from "../lib/fonts";
 import { saveAutosave } from "../lib/documentIO";
+import { collectPlaces } from "../lib/places";
+import {
+  measureRenderPlaceBoxes,
+  synthesizeMarkerBoxes,
+} from "../lib/placeHitTest";
 import { renderMapToCanvas } from "../lib/renderMap";
 import { refreshServerStatus } from "../lib/api";
 import { useWorldStore } from "../state/worldStore";
@@ -79,6 +84,17 @@ export function useAppPipeline(): void {
       try {
         const canvas = renderMapToCanvas(state.layers, state.document, BASE_RENDER_SIZE, "preview");
         useWorldStore.getState().renderDone(canvas, performance.now() - startedAt);
+        try {
+          const boxes = measureRenderPlaceBoxes(state.document, state.layers);
+          if (boxes) {
+            useWorldStore.getState().setHitBoxes(boxes, "renderer");
+          } else {
+            const visible = collectPlaces(state.document, state.layers).visible;
+            useWorldStore.getState().setHitBoxes(synthesizeMarkerBoxes(visible), "marker");
+          }
+        } catch {
+          useWorldStore.getState().setHitBoxes(null, null);
+        }
       } catch (error) {
         useWorldStore
           .getState()
@@ -99,16 +115,13 @@ export function useAppPipeline(): void {
 
     const write = (markSaving: boolean) => {
       const state = useWorldStore.getState();
+      if (state.autosaveRecovery) return; // do not overwrite a corrupt autosave
       if (markSaving) state.markSaving();
       const result = saveAutosave(state.document);
       if (result.ok) {
         useWorldStore.getState().markSaved(result.savedAt);
       } else {
-        const wasError = useWorldStore.getState().save.phase === "error";
         useWorldStore.getState().markSaveError(result.error ?? "自动保存失败");
-        if (!wasError && result.error) {
-          useWorldStore.getState().pushToast("error", result.error);
-        }
       }
     };
 
@@ -129,7 +142,10 @@ export function useAppPipeline(): void {
       }, AUTOSAVE_DEBOUNCE_MS);
     });
 
-    if (!useWorldStore.getState().restoredFromAutosave) {
+    if (
+      !useWorldStore.getState().restoredFromAutosave &&
+      !useWorldStore.getState().autosaveRecovery
+    ) {
       timer = window.setTimeout(() => {
         timer = null;
         write(false);

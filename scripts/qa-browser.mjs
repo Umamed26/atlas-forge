@@ -13,7 +13,7 @@
  * Output: out/e2e/*.png, out/e2e/report.json, out/e2e/exported-world.json
  */
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -24,9 +24,34 @@ const OUT = join(ROOT, "out", "e2e");
 const WEB_URL = process.env.WEB_URL ?? "http://127.0.0.1:5173/";
 const API_HEALTH_URL = process.env.API_URL ?? "http://127.0.0.1:8787/api/health";
 const API_RENDER_URL = API_HEALTH_URL.replace(/\/api\/health$/, "/api/render");
-const CHROME =
-  process.env.CHROME_PATH ??
-  join(homedir(), ".cache", "ms-playwright", "chromium-1243", "chrome-linux64", "chrome");
+/**
+ * Resolve Chromium: explicit CHROME_PATH, then a cached Playwright build, then
+ * let playwright-core resolve its own managed browser (installed in CI).
+ */
+function findChromium() {
+  if (process.env.CHROME_PATH) return process.env.CHROME_PATH;
+  const root = join(homedir(), ".cache", "ms-playwright");
+  try {
+    const builds = readdirSync(root)
+      .filter((entry) => entry.startsWith("chromium-"))
+      .sort()
+      .reverse();
+    for (const build of builds) {
+      for (const candidate of [
+        join(root, build, "chrome-linux64", "chrome"),
+        join(root, build, "chrome-linux", "chrome"),
+        join(root, build, "chrome-linux64", "headless_shell"),
+        join(root, build, "chrome-linux", "headless_shell"),
+      ]) {
+        if (existsSync(candidate)) return candidate;
+      }
+    }
+  } catch {
+    // no cache directory: fall back to playwright-managed browser
+  }
+  return null;
+}
+const CHROME = findChromium();
 const NO_SERVER = process.argv.includes("--no-server");
 
 mkdirSync(OUT, { recursive: true });
@@ -153,14 +178,16 @@ async function setSlider(page, testId, value) {
 }
 
 async function main() {
-  if (!existsSync(CHROME)) throw new Error(`chromium not found at ${CHROME}`);
+  if (CHROME && !existsSync(CHROME)) throw new Error(`chromium not found at ${CHROME}`);
   if (!NO_SERVER) await startServers();
 
-  const browser = await chromium.launch({
-    executablePath: CHROME,
+  const launchOptions = {
     headless: true,
     args: ["--no-sandbox", "--disable-dev-shm-usage"],
-  });
+    ...(CHROME ? { executablePath: CHROME } : {}),
+  };
+  if (!CHROME) notes.push("using playwright-managed browser (no cached chromium found)");
+  const browser = await chromium.launch(launchOptions);
   const context = await browser.newContext({
     viewport: { width: 1680, height: 1000 },
     deviceScaleFactor: 1,
@@ -424,6 +451,111 @@ async function main() {
     notes.push(`places flow failed: ${String(error)}`);
   }
 
+  // 5e. Polish round: renderer-sourced hit boxes, hover cost, keyboard guard,
+  //     shortcut single-source, naming helper.
+  try {
+    const pbox2 = await page.locator('[data-testid="map-canvas"]').boundingBox();
+    const hitBoxes = await page.evaluate(() => globalThis.__atlasDebug?.getPlaceHitBoxes?.() ?? []);
+    const hitSummary = await page.evaluate(() => globalThis.__atlasDebug?.getSummary?.() ?? null);
+    notes.push(
+      `polish: hitBoxes source=${hitSummary?.hitBoxesSource} count=${hitBoxes.length} hitTestMs=${hitSummary?.perf?.hitTestMs}`,
+    );
+
+    // Click near the right edge of the widest label bbox -> tail of the text must hit.
+    const candidate = hitBoxes
+      .filter((box) => box.entity === "label" && box.screen.width >= 36)
+      .sort((a, b) => b.screen.width - a.screen.width)[0];
+    if (pbox2 && candidate) {
+      await page.locator('[data-testid="tool-places"]').click();
+      const tx = pbox2.x + candidate.screen.x + candidate.screen.width - 3;
+      const ty = pbox2.y + candidate.screen.y + candidate.screen.height / 2;
+      await page.mouse.click(tx, ty);
+      await sleep(250);
+      const selected = await page.evaluate(
+        () => globalThis.__atlasDebug?.getSummary?.()?.places?.selected ?? null,
+      );
+      notes.push(
+        `polish: label-tail click selected=${JSON.stringify(selected)} expected=${candidate.id}`,
+      );
+    } else {
+      notes.push("polish: no label bbox available for tail-click check");
+    }
+
+    // Hover/pointer moves must not trigger a generation.
+    const seqBeforeHover = await page.evaluate(
+      () => globalThis.__atlasDebug?.getSummary?.()?.generation?.seq ?? -1,
+    );
+    if (pbox2) {
+      await page.mouse.move(pbox2.x + pbox2.width * 0.3, pbox2.y + pbox2.height * 0.3);
+      for (let i = 0; i < 24; i += 1) {
+        await page.mouse.move(
+          pbox2.x + pbox2.width * (0.3 + (i % 6) * 0.06),
+          pbox2.y + pbox2.height * (0.3 + (i % 4) * 0.05),
+        );
+        await sleep(12);
+      }
+    }
+    await sleep(400);
+    const seqAfterHover = await page.evaluate(
+      () => globalThis.__atlasDebug?.getSummary?.()?.generation?.seq ?? -1,
+    );
+    notes.push(`polish: hover regenerated=${seqBeforeHover !== seqAfterHover} (seq ${seqBeforeHover}->${seqAfterHover})`);
+
+    // Delete/Backspace inside the rename input must not delete the place.
+    if (placeId) {
+      const nameBefore = await page.evaluate((id) => {
+        const doc = globalThis.__atlasDebug?.getDocument?.() ?? null;
+        return (doc?.settlements ?? []).find((entry) => entry.id === id)?.name ?? null;
+      }, placeId);
+      await page.locator(`[data-testid="place-list-item-${placeId}"]`).click();
+      await page.locator('[data-testid="place-rename"]').click();
+      const renameInput = page.locator('[data-testid="place-rename-input"]');
+      await renameInput.fill("临时改名");
+      await renameInput.press("Delete");
+      await renameInput.press("Backspace");
+      await page.keyboard.press("Escape");
+      await sleep(250);
+      const nameAfter = await page.evaluate((id) => {
+        const doc = globalThis.__atlasDebug?.getDocument?.() ?? null;
+        return (doc?.settlements ?? []).find((entry) => entry.id === id)?.name ?? null;
+      }, placeId);
+      const stillExists = nameAfter !== null;
+      notes.push(
+        `polish: rename-input guard unchanged=${nameBefore === nameAfter} stillExists=${stillExists}`,
+      );
+    }
+
+    // Shortcut single source: HelpDialog rows == debug getShortcuts() length.
+    const shortcuts = await page.evaluate(() => globalThis.__atlasDebug?.getShortcuts?.()?.length ?? 0);
+    let helpRows = null;
+    try {
+      await page.locator('[data-testid="help"]').click();
+      await page.waitForSelector('[data-testid="help-dialog"]', { timeout: 5_000 });
+      helpRows = await page.evaluate(
+        () => document.querySelectorAll('[data-testid="help-dialog"] .shortcut-table tbody tr').length,
+      );
+      await page.keyboard.press("Escape");
+      await sleep(200);
+    } catch (error) {
+      notes.push(`polish: help shortcut check failed: ${String(error)}`);
+    }
+    notes.push(`polish: shortcuts debug=${shortcuts} helpRows=${helpRows}`);
+
+    // Pure helper probes: hit priority topmost + deterministic naming dedupe.
+    const probes = await page.evaluate(() => {
+      const debug = globalThis.__atlasDebug;
+      return {
+        hitPriority: debug?.testHitPriority?.() ?? null,
+        naming: debug?.getNamingDemo?.() ?? null,
+      };
+    });
+    notes.push(
+      `polish: hitPriority=${JSON.stringify(probes.hitPriority)} naming=${JSON.stringify(probes.naming)}`,
+    );
+  } catch (error) {
+    notes.push(`polish probes failed: ${String(error)}`);
+  }
+
   // 6. Live debug document summary.
   let summary = null;
   try {
@@ -456,6 +588,27 @@ async function main() {
     );
   } catch (error) {
     notes.push(`JSON export failed: ${String(error)}`);
+  }
+
+  // 7b. Invalid JSON import must be rejected without replacing the document.
+  try {
+    const seedBefore = await page.evaluate(() => globalThis.__atlasDebug?.getDocument?.()?.seed ?? null);
+    const badPath = join(OUT, "invalid-world.json");
+    writeFileSync(badPath, '{ "version": 1, "seed": 42, "params": { "seaLevel": ');
+    await page.locator('[data-testid="import-json-input"]').setInputFiles(badPath);
+    await sleep(800);
+    const seedAfter = await page.evaluate(() => globalThis.__atlasDebug?.getDocument?.()?.seed ?? null);
+    const toast = await page
+      .locator('[data-testid="toast"]')
+      .first()
+      .textContent()
+      .catch(() => null);
+    notes.push(
+      `import-invalid: docUnchanged=${seedBefore === seedAfter} toast=${String(toast).trim().slice(0, 120)}`,
+    );
+    await shot(page, "07c-import-invalid.png");
+  } catch (error) {
+    notes.push(`import-invalid check failed: ${String(error)}`);
   }
 
   // 8. Server-side large render (512 for speed) using the exported document.
@@ -518,6 +671,16 @@ async function main() {
   try {
     await page.locator('[data-testid="export-png"]').click();
     await page.waitForSelector('[data-testid^="export-size-"]', { timeout: 10_000 });
+    const filenamePreview =
+      (await page.locator('[data-testid="export-filename"]').first().textContent().catch(() => null)) ??
+      (await page
+        .locator(".export-summary-row")
+        .nth(1)
+        .locator("strong")
+        .first()
+        .textContent()
+        .catch(() => null));
+    notes.push(`export: filename preview=${String(filenamePreview).trim()}`);
     const downloadPromise = page.waitForEvent("download", { timeout: 90_000 });
     await page.locator('[data-testid="export-size-1024"]').first().click();
     await page.locator('[data-testid="export-start"]').click();
@@ -528,6 +691,12 @@ async function main() {
     notes.push(
       `client PNG export: bytes=${bytes.length} png=${bytes[0] === 0x89 && bytes[1] === 0x50}`,
     );
+    const resultFilename = await page
+      .locator('[data-testid="export-result-filename"]')
+      .first()
+      .textContent()
+      .catch(() => null);
+    notes.push(`export: result filename=${String(resultFilename).trim()}`);
     await shot(page, "08b-export-result.png");
     const closeButton = page.locator('[data-testid="export-dialog-close"]');
     if (await closeButton.count()) await closeButton.click().catch(() => {});
@@ -561,6 +730,91 @@ async function main() {
     await shot(page, "09-after-reload.png");
   } catch (error) {
     notes.push(`autosave restore check failed: ${String(error)}`);
+  }
+
+  // 13. Collapsible groups remember their state across reloads.
+  try {
+    const paramsGroup = page.locator('[data-testid="group-params"]');
+    const toggle = paramsGroup.locator('.panel-group-head').first();
+    await toggle.click();
+    await sleep(300);
+    const collapsedNow = (await page.locator('[data-testid="param-seaLevel"]').count()) === 0 ||
+      !(await page.locator('[data-testid="param-seaLevel"]').isVisible().catch(() => false));
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await page.waitForSelector('[data-testid="map-canvas"]', { timeout: 30_000 });
+    await waitGenerated(page);
+    await sleep(900);
+    const stillVisible = await page
+      .locator('[data-testid="param-seaLevel"]')
+      .isVisible()
+      .catch(() => false);
+    notes.push(`layout: params collapsed=${collapsedNow} persisted=${!stillVisible}`);
+    await shot(page, "11-collapsed-persisted.png");
+  } catch (error) {
+    notes.push(`layout persistence check failed: ${String(error)}`);
+  }
+
+  // 14. Narrow desktop viewports must not overflow horizontally.
+  try {
+    for (const viewport of [
+      { width: 1280, height: 800, name: "12-narrow-1280.png" },
+      { width: 1024, height: 768, name: "12-narrow-1024.png" },
+    ]) {
+      await page.setViewportSize({ width: viewport.width, height: viewport.height });
+      await sleep(600);
+      const overflow = await page.evaluate(() => {
+        const el = document.scrollingElement ?? document.documentElement;
+        return {
+          horizontal: el.scrollWidth - el.clientWidth,
+          vertical: el.scrollHeight - el.clientHeight,
+        };
+      });
+      notes.push(`narrow ${viewport.width}x${viewport.height}: overflow=${JSON.stringify(overflow)}`);
+      await shot(page, viewport.name);
+    }
+    await page.setViewportSize({ width: 1680, height: 1000 });
+    await sleep(300);
+  } catch (error) {
+    notes.push(`narrow viewport check failed: ${String(error)}`);
+  }
+
+  // 15. Corrupted autosave must show recovery instead of silently overwriting.
+  try {
+    const backupSeed = await page.evaluate(() => {
+      try {
+        const raw = localStorage.getItem("atlas_forge.world.backup.v1");
+        return raw ? (JSON.parse(raw)?.document?.seed ?? null) : null;
+      } catch {
+        return null;
+      }
+    });
+    // A normal reload flushes the current document on beforeunload, which would
+    // overwrite our corruption. Inject the corrupt value before the app boots.
+    await page.addInitScript(() => {
+      try {
+        localStorage.setItem("atlas_forge.world.v1", "{ corrupted autosave ");
+      } catch {
+        // ignore
+      }
+    });
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await page.waitForSelector('[data-testid="map-canvas"]', { timeout: 30_000 }).catch(() => {});
+    await sleep(1_500);
+    const recovery = await page.locator('[data-testid="autosave-recovery"]').count();
+    notes.push(`autosave-recovery: panel=${recovery} backupSeed=${backupSeed}`);
+    if (recovery > 0) {
+      await shot(page, "13-autosave-recovery.png");
+      await page.locator('[data-testid="autosave-recover"]').click();
+      await waitGenerated(page);
+      await sleep(900);
+      const recoveredSeed = await page.evaluate(
+        () => globalThis.__atlasDebug?.getDocument?.()?.seed ?? null,
+      );
+      notes.push(`autosave-recovery: recoveredSeed=${recoveredSeed}`);
+      await shot(page, "14-after-recovery.png");
+    }
+  } catch (error) {
+    notes.push(`autosave recovery check failed: ${String(error)}`);
   }
 
   await shot(page, "10-final.png");

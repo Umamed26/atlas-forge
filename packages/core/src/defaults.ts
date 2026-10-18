@@ -14,6 +14,7 @@ export const DEFAULT_PARAMS: WorldParams = {
   windBands: true,
   moistureBias: 0,
   temperatureOffset: 0,
+  namingLanguage: "auto",
 };
 
 export const DEFAULT_STYLE: RenderStyle = {

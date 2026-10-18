@@ -1,0 +1,46 @@
+{
+  "version": 1,
+  "id": "world-mvdgd9v5-1",
+  "name": "Aetheris",
+  "seed": 20261018,
+  "params": {
+    "gridSize": 1024,
+    "seaLevel": 0.42,
+    "continentScale": 1,
+    "continentality": 0.62,
+    "warpStrength": 0.35,
+    "ridgeStrength": 0.55,
+    "ridgeScale": 2.1,
+    "erosionIterations": 60,
+    "riverDensity": 0.5,
+    "windAngle": 0,
+    "windBands": true,
+    "moistureBias": 0,
+    "temperatureOffset": 0,
+    "namingLanguage": "cjk"
+  },
+  "style": {
+    "preset": "parchment-classic",
+    "title": "Aetheris",
+    "showLabels": true,
+    "showRivers": true,
+    "showGraticule": false,
+    "showBorder": true,
+    "showCompass": true,
+    "showLegend": true,
+    "labelDensity": 0.6,
+    "paperTexture": 0.55,
+    "hillshadeStrength": 0.55,
+    "coastHatching": 0.6
+  },
+  "overrides": {
+    "elevation": [],
+    "riverForce": [],
+    "biome": [],
+    "hiddenIds": []
+  },
+  "settlements": [],
+  "labels": [],
+  "createdAt": "2026-10-18T06:36:55.985Z",
+  "updatedAt": "2026-10-18T06:36:58.339Z"
+}

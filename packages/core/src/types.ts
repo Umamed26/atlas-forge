@@ -72,6 +72,12 @@ export interface WorldParams {
   moistureBias: number;
   /** -0.35..0.35 global temperature shift. */
   temperatureOffset: number;
+  /**
+   * Procedural naming culture for settlements and labels.
+   * "auto" keeps the historical seed-hash behaviour (old documents unchanged);
+   * "cjk" forces Chinese names, "latin" forces Latin names.
+   */
+  namingLanguage: "auto" | "cjk" | "latin";
 }
 
 export interface RenderStyle {

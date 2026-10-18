@@ -163,5 +163,22 @@ pnpm dev            # web(5173) + api(8787)
 pnpm typecheck
 pnpm test
 pnpm qa:render      # Node 端出 QA PNG 到 out/
+pnpm qa:browser     # Playwright E2E + 截图到 out/e2e/
 pnpm build
 ```
+
+## 12. 交付状态（2026-10-18）
+
+| 里程碑 | 状态 | 证据 |
+| --- | --- | --- |
+| M0 骨架/契约 | ✅ | monorepo、Worker 管线打通、Node 出图链路、`pnpm dev` |
+| M1–M4 生成管线 | ✅ | core 9 test files / 44 tests；30 seed 水文不变量；override 逐字节往返；缓存命中 15–25ms；1024² 550–850ms |
+| M5 渲染 + 后端导出 | ✅ | 共享渲染器 + EB Garamond；两套预设；1024 render 100–140ms；4096 端到端 5–8s；health/错误码/队列/内存预检 |
+| M6 Web UI | ✅ | 参数/风格面板、pan/zoom、三类画笔、撤销、JSON/PNG 导出、自动保存、命名语言；Playwright 47 断言通过 |
+| M7 集成验收 | ✅ | `pnpm typecheck`、core 44 tests、render 12 tests、web build、Lead E2E（0 console/page error，生成/调参/笔画/强制河道/撤销/导出/恢复全通过）、截图审图 |
+
+**命名语言追加**：`WorldParams.namingLanguage: "auto" | "cjk" | "latin"`（additive；auto 与旧文档逐字节一致），UI 已提供下拉。
+
+**交付物**：可运行仓库 + `examples/`（示例世界 JSON、经典/Aged Ink 成图、应用截图）+ `README.md` 使用与架构说明 + 本 TODO 验收记录。
+
+**遗留（非首版目标）**：地名/城镇交互式改名拖动、8192 低内存压测、Firefox/Safari 兼容、多尺度下钻/球面投影/账号云同步。

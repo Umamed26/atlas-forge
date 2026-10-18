@@ -1,0 +1,123 @@
+/**
+ * Global keyboard shortcuts. Editable inputs are never hijacked except for
+ * Escape (which closes overlays / cancels river drawing).
+ */
+import { useEffect, useRef } from "react";
+
+import { isEditableTarget } from "../lib/utils";
+import { useViewStore } from "../state/viewStore";
+import { useWorldStore } from "../state/worldStore";
+
+export interface ShortcutHandlers {
+  onOpenHelp: () => void;
+  onOpenExport: () => void;
+  closeOverlays: () => boolean;
+}
+
+export function useShortcuts(handlers: ShortcutHandlers): void {
+  const handlersRef = useRef(handlers);
+  handlersRef.current = handlers;
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      const world = useWorldStore.getState();
+      const view = useViewStore.getState();
+      const editable = isEditableTarget(event.target);
+      const key = event.key;
+      const lower = key.length === 1 ? key.toLowerCase() : key;
+      const mod = event.ctrlKey || event.metaKey;
+
+      // Escape always works: close dialogs, cancel river drafting.
+      if (key === "Escape") {
+        const closed = handlersRef.current.closeOverlays();
+        if (!closed) {
+          if (world.riverDraft.points.length > 0) {
+            world.clearRiverDraft();
+            world.pushToast("info", "已取消河道绘制");
+          }
+        }
+        return;
+      }
+
+      if (editable) return;
+
+      if (mod) {
+        if (lower === "z") {
+          event.preventDefault();
+          if (event.shiftKey) world.redo();
+          else world.undo();
+          return;
+        }
+        if (lower === "y") {
+          event.preventDefault();
+          world.redo();
+          return;
+        }
+        if (key === "Enter") {
+          event.preventDefault();
+          world.requestGeneration("now");
+          return;
+        }
+        return;
+      }
+
+      switch (lower) {
+        case "1":
+          event.preventDefault();
+          world.setTool("elevation");
+          break;
+        case "2":
+          event.preventDefault();
+          world.setTool("river");
+          break;
+        case "3":
+          event.preventDefault();
+          world.setTool("biome");
+          break;
+        case "v":
+          event.preventDefault();
+          world.setTool("pan");
+          break;
+        case "f":
+          event.preventDefault();
+          view.fit();
+          break;
+        case "0":
+          event.preventDefault();
+          view.oneToOne();
+          break;
+        case "+":
+        case "=":
+          event.preventDefault();
+          view.zoomBy(1.25);
+          break;
+        case "-":
+        case "_":
+          event.preventDefault();
+          view.zoomBy(0.8);
+          break;
+        case "?":
+          event.preventDefault();
+          handlersRef.current.onOpenHelp();
+          break;
+        case "Enter":
+          if (world.riverDraft.points.length >= 2) {
+            event.preventDefault();
+            world.commitRiverDraft();
+          }
+          break;
+        case "Backspace":
+          if (world.riverDraft.points.length > 0) {
+            event.preventDefault();
+            world.undoRiverPoint();
+          }
+          break;
+        default:
+          return;
+      }
+    };
+
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, []);
+}

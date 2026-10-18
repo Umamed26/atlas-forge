@@ -10,7 +10,8 @@
     "build": "pnpm -r build",
     "test": "pnpm -r test",
     "typecheck": "pnpm -r typecheck",
-    "qa:render": "tsx scripts/qa-render.ts"
+    "qa:render": "tsx scripts/qa-render.ts",
+    "qa:browser": "node scripts/qa-browser.mjs"
   },
   "devDependencies": {
     "@atlas/core": "workspace:*",
@@ -18,6 +19,7 @@
     "@napi-rs/canvas": "^0.1.60",
     "@types/node": "^24.0.0",
     "concurrently": "^9.1.0",
+    "playwright-core": "^1.64.1",
     "tsx": "^4.19.0",
     "typescript": "^5.7.0"
   }

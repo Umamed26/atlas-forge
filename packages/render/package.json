@@ -3,9 +3,14 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "exports": { ".": "./src/index.ts" },
+  "exports": {
+    ".": "./src/index.ts",
+    "./node-fonts": "./src/node-fonts.ts",
+    "./png": "./src/png-node.ts"
+  },
   "scripts": {
-    "typecheck": "tsc -p tsconfig.json"
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "tsx test/synthetic.test.ts"
   },
   "dependencies": {
     "@atlas/core": "workspace:*"

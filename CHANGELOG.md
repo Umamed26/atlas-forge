@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.4.1 — 2026-10-19
+
+工程修复（无产品行为变化）：
+- 视觉回归门禁改为**抗环境噪声判定**：像素仅在某通道 `|Δ|>16` 时计为不同（结构差 ≤0.15%），并加 64×64 降采样均值差 ≤3.0 抓整体漂移；sha256 降级为诊断信息。
+- 视觉基线矩阵改为 **latin-only**（`namingLanguage=latin` + ASCII 标题），不再依赖 runner 的 CJK 字体；产品首屏卡片仍保留中文标题，从独立路径生成（`--cards-only`）。
+- 新增 `scripts/visual-selftest.ts`：±6 噪声/亮度 +3 必须 PASS，亮度 +8 / 平移 2px / 标签改色必须 FAIL；断言基线内无 CJK。
+- CI 恢复绿色（Job: typecheck + tests + build + render smoke + visual regression）。
+
 ## v0.4.0 — 2026-10-19
 
 主题：**让不懂参数的创作者 10 秒拿到一张能用的图，并且换不坏。**

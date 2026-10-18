@@ -17,10 +17,12 @@ import { join } from "node:path";
 import { createCanvas, loadImage } from "@napi-rs/canvas";
 import {
   BASELINE_DIR,
+  BASELINE_LATIN_TITLES,
   CHANNEL_DELTA_TOLERANCE,
   DOWNSAMPLED_DELTA_THRESHOLD,
   STRUCTURAL_DIFF_THRESHOLD,
   comparePngStructural,
+  loadManifest,
   metricsPass,
   type VisualDiffMetrics,
 } from "./visual-lib";
@@ -194,6 +196,26 @@ async function main(): Promise<void> {
     const ok = passCount === files.length;
     if (!ok) failures += 1;
     console.log(`  ${ok ? "✓" : "✗"} untouched local baselines      ${passCount}/${files.length} PASS`);
+  }
+
+  // Baselines must stay font-independent: no CJK title may leak into the
+  // compared plates, otherwise CI runners without CJK fallback fonts render
+  // different glyphs (this was the v0.4.0 CI failure).
+  {
+    const manifest = loadManifest();
+    const cjk = /[\u3400-\u9fff]/;
+    const nonAsciiTitles = Object.entries(BASELINE_LATIN_TITLES).filter(([, title]) => !/^[\x20-\x7e]+$/.test(title));
+    const cjkScenarioNames = manifest
+      ? manifest.entries.filter((entry) => cjk.test(entry.scenarioName)).map((entry) => entry.id)
+      : ["manifest-missing"];
+    const latinOnly = manifest?.fontScope === "latin-only";
+    const ok = latinOnly && nonAsciiTitles.length === 0 && cjkScenarioNames.length === 0;
+    if (!ok) failures += 1;
+    console.log(
+      `  ${ok ? "✓" : "✗"} baseline manifest latin-only      ` +
+        `fontScope=${manifest?.fontScope ?? "missing"} · CJK scenarioNames=${cjkScenarioNames.length}` +
+        `${nonAsciiTitles.length > 0 ? ` · non-ASCII titles=${nonAsciiTitles.join(",")}` : ""}`,
+    );
   }
 
   if (failures > 0) {

@@ -27,14 +27,26 @@ export function useShortcuts(handlers: ShortcutHandlers): void {
       const lower = key.length === 1 ? key.toLowerCase() : key;
       const mod = event.ctrlKey || event.metaKey;
 
-      // Escape always works: close dialogs, cancel river drafting.
+      // Escape always works, in priority order: dialogs → rename → placement →
+      // place selection → river drafting.
       if (key === "Escape") {
         const closed = handlersRef.current.closeOverlays();
-        if (!closed) {
-          if (world.riverDraft.points.length > 0) {
-            world.clearRiverDraft();
-            world.pushToast("info", "已取消河道绘制");
-          }
+        if (closed) return;
+        if (world.placeRename) {
+          world.cancelPlaceRename();
+          return;
+        }
+        if (world.placeTool.armed) {
+          world.disarmPlacement();
+          return;
+        }
+        if (world.selectedPlace) {
+          world.selectPlace(null);
+          return;
+        }
+        if (world.riverDraft.points.length > 0) {
+          world.clearRiverDraft();
+          world.pushToast("info", "已取消河道绘制");
         }
         return;
       }
@@ -74,6 +86,10 @@ export function useShortcuts(handlers: ShortcutHandlers): void {
           event.preventDefault();
           world.setTool("biome");
           break;
+        case "4":
+          event.preventDefault();
+          world.setTool("places");
+          break;
         case "v":
           event.preventDefault();
           world.setTool("pan");
@@ -110,6 +126,12 @@ export function useShortcuts(handlers: ShortcutHandlers): void {
           if (world.riverDraft.points.length > 0) {
             event.preventDefault();
             world.undoRiverPoint();
+          }
+          break;
+        case "Delete":
+          if (world.selectedPlace) {
+            event.preventDefault();
+            world.deletePlace(world.selectedPlace.id, world.selectedPlace.entity);
           }
           break;
         default:

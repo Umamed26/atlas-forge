@@ -60,6 +60,9 @@ async function summary(page) {
 }
 
 async function waitIdle(page, timeout = 90_000) {
+  // Give effects/setTimeout(0) a chance to dispatch a just-requested generation
+  // so we never observe the previous idle state right after an edit.
+  await sleep(140);
   await page.waitForFunction(
     () => {
       const api = window.__atlasDebug;
@@ -120,6 +123,19 @@ async function clickCanvas(page, normalized) {
     box.x + normalized[0] * box.width,
     box.y + normalized[1] * box.height,
   );
+}
+
+async function placeMarkerScreen(page, placeId) {
+  return page.evaluate((id) => {
+    const data = window.__atlasDebug.getSummary();
+    const entry = data.places.list.find((place) => place.id === id);
+    if (!entry) return null;
+    const view = data.view;
+    return {
+      x: view.offsetX + entry.x * view.baseSize * view.scale,
+      y: view.offsetY + entry.y * view.baseSize * view.scale,
+    };
+  }, placeId);
 }
 
 async function main() {
@@ -183,6 +199,7 @@ async function main() {
       "tool-elevation",
       "tool-river",
       "tool-biome",
+      "tool-places",
       "undo",
       "redo",
       "export-png",
@@ -549,6 +566,421 @@ async function main() {
   );
   await screenshot(page, "06-biome.png");
 
+
+  // ── 6c. places & labels editing ─────────────────────────────────────
+  log("places editing");
+  await page.keyboard.press("4");
+  await page.waitForTimeout(150);
+  const toolAfterShortcut = await summary(page);
+  check(
+    "shortcut 4 switches to the places tool",
+    toolAfterShortcut.tool === "places" &&
+      (await page.locator('[data-testid="tool-places"]').getAttribute("aria-pressed")) === "true",
+    `tool=${toolAfterShortcut.tool}`,
+  );
+
+  // place a new settlement (port) with an explicit name
+  await page.locator('[data-testid="place-mode-settlement"]').click();
+  await page.locator('[data-testid="place-kind-select"]').selectOption("port");
+  await page.locator('[data-testid="place-name-input"]').fill("测试港");
+  await page.locator('[data-testid="place-add"]').click();
+  check("placement mode arms after clicking place-add", (await summary(page)).places.armed === true);
+  await clickCanvas(page, [0.42, 0.46]);
+  await waitIdle(page);
+  const afterAdd = await summary(page);
+  const added = afterAdd.places.list.find((entry) => entry.name === "测试港");
+  check(
+    "placing a settlement creates a pinned user entry",
+    Boolean(added && added.entity === "settlement" && added.userAdded && added.pinned),
+    JSON.stringify(added ?? null),
+  );
+  check(
+    "user placement ids use the stable user-s- prefix",
+    typeof added?.id === "string" && added.id.startsWith("user-s-"),
+    added?.id ?? "(missing)",
+  );
+  const addedId = added?.id;
+  const docAfterAdd = await page.evaluate((id) => {
+    const entry = window.__atlasDebug.getDocument().settlements.find((settlement) => settlement.id === id);
+    return entry
+      ? { name: entry.name, kind: entry.kind, x: entry.x, y: entry.y, pinned: entry.pinned }
+      : null;
+  }, addedId);
+  check(
+    "document.settlements stores the new place with normalized coordinates",
+    Boolean(
+      docAfterAdd &&
+        docAfterAdd.pinned === true &&
+        docAfterAdd.x >= 0 &&
+        docAfterAdd.x <= 1 &&
+        docAfterAdd.y >= 0 &&
+        docAfterAdd.y <= 1,
+    ),
+    JSON.stringify(docAfterAdd),
+  );
+
+  // canvas hover + click selection + Esc
+  const canvasBox = await page.locator('[data-testid="map-canvas"]').boundingBox();
+  const markerBeforeLocate = await placeMarkerScreen(page, addedId);
+  await page.mouse.move(canvasBox.x + markerBeforeLocate.x, canvasBox.y + markerBeforeLocate.y);
+  await page.waitForTimeout(150);
+  const hoverCursor = await page.evaluate(
+    () => document.querySelector('[data-testid="map-canvas"]').style.cursor,
+  );
+  check(
+    "hovering a place shows the pointer cursor",
+    hoverCursor === "pointer",
+    `cursor=${hoverCursor ?? "(none)"}`,
+  );
+  await page.mouse.click(canvasBox.x + markerBeforeLocate.x, canvasBox.y + markerBeforeLocate.y);
+  await page.waitForTimeout(150);
+  check(
+    "clicking a place on the canvas selects it",
+    (await summary(page)).places.selected?.id === addedId,
+    JSON.stringify((await summary(page)).places.selected),
+  );
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(120);
+  check("Esc clears the place selection", (await summary(page)).places.selected === null);
+
+  // list selection + locate
+  await page.locator(`[data-testid="place-list-item-${addedId}"]`).click();
+  await page.waitForTimeout(200);
+  check(
+    "place list click selects the entry",
+    (await summary(page)).places.selected?.id === addedId,
+    JSON.stringify((await summary(page)).places.selected),
+  );
+  check(
+    "place locate centers the view at >= 1:1 zoom",
+    (await summary(page)).view.scale >= 0.99,
+    `scale=${(await summary(page)).view.scale}`,
+  );
+
+  // rename through the inspector
+  await page.locator('[data-testid="place-rename"]').click();
+  await page.locator('[data-testid="place-rename-input"]').fill("金湾港");
+  await page.locator('[data-testid="place-rename-commit"]').click();
+  await waitIdle(page);
+  const renamedDoc = await page.evaluate(
+    (id) => window.__atlasDebug.getDocument().settlements.find((entry) => entry.id === id),
+    addedId,
+  );
+  await page.waitForFunction(
+    (id) =>
+      window.__atlasDebug.getLayers()?.settlements?.find((entry) => entry.id === id)?.name === "金湾港",
+    addedId,
+    { timeout: 30_000, polling: 100 },
+  );
+  const renamedLayer = await page.evaluate(
+    (id) => window.__atlasDebug.getLayers().settlements.find((entry) => entry.id === id),
+    addedId,
+  );
+  check(
+    "inspector rename writes a pinned document entry",
+    renamedDoc?.name === "金湾港" && renamedDoc?.pinned === true,
+    renamedDoc?.name,
+  );
+  check("regenerated layers reflect the rename", renamedLayer?.name === "金湾港", renamedLayer?.name);
+
+  // double click to rename on the canvas
+  const marker = await placeMarkerScreen(page, addedId);
+  await page.mouse.dblclick(canvasBox.x + marker.x, canvasBox.y + marker.y);
+  await page.waitForTimeout(250);
+  check(
+    "double-clicking a place opens the rename input",
+    (await page.locator('[data-testid="place-rename-input"]').count()) === 1,
+  );
+  await page.locator('[data-testid="place-rename-input"]').fill("雾岭港");
+  await page.keyboard.press("Enter");
+  await waitIdle(page);
+  check(
+    "double-click rename commits",
+    (await page.evaluate(
+      (id) => window.__atlasDebug.getDocument().settlements.find((entry) => entry.id === id)?.name,
+      addedId,
+    )) === "雾岭港",
+  );
+
+  await screenshot(page, "06b-places-inspector.png");
+
+  // drag to move, ghost shown, no regeneration until pointerup
+  const beforeMove = await page.evaluate(
+    (id) => window.__atlasDebug.getDocument().settlements.find((entry) => entry.id === id),
+    addedId,
+  );
+  const seqBeforeDrag = (await summary(page)).generation.seq;
+  const dragMarker = await placeMarkerScreen(page, addedId);
+  await page.mouse.move(canvasBox.x + dragMarker.x, canvasBox.y + dragMarker.y);
+  await page.mouse.down();
+  await page.mouse.move(canvasBox.x + dragMarker.x + 90, canvasBox.y + dragMarker.y + 50, { steps: 10 });
+  await page.waitForTimeout(180);
+  const ghostCount = await page.locator('[data-testid="place-drag-ghost"]').count();
+  await screenshot(page, "06c-place-drag-ghost.png");
+  const midDrag = await summary(page);
+  await page.mouse.up();
+  check("drag ghost is visible while dragging", ghostCount === 1, `count=${ghostCount}`);
+  check(
+    "dragging does not regenerate until pointerup",
+    midDrag.generation.seq === seqBeforeDrag,
+    `seq ${seqBeforeDrag} -> ${midDrag.generation.seq}`,
+  );
+  await waitIdle(page);
+  const afterMove = await page.evaluate(
+    (id) => window.__atlasDebug.getDocument().settlements.find((entry) => entry.id === id),
+    addedId,
+  );
+  await page.waitForFunction(
+    (id) => {
+      const layer = window.__atlasDebug.getLayers()?.settlements?.find((entry) => entry.id === id);
+      const doc = window.__atlasDebug.getDocument().settlements.find((entry) => entry.id === id);
+      return Boolean(layer && doc && Math.abs(layer.x - doc.x) < 0.002 && Math.abs(layer.y - doc.y) < 0.002);
+    },
+    addedId,
+    { timeout: 30_000, polling: 100 },
+  );
+  const movedLayer = await page.evaluate(
+    (id) => window.__atlasDebug.getLayers().settlements.find((entry) => entry.id === id),
+    addedId,
+  );
+  check(
+    "drag commits new normalized coordinates into a pinned entry",
+    Boolean(
+      beforeMove &&
+        afterMove &&
+        afterMove.pinned === true &&
+        Math.hypot(afterMove.x - beforeMove.x, afterMove.y - beforeMove.y) > 0.02,
+    ),
+    `before=(${beforeMove?.x?.toFixed(3)},${beforeMove?.y?.toFixed(3)}) after=(${afterMove?.x?.toFixed(3)},${afterMove?.y?.toFixed(3)})`,
+  );
+  check(
+    "regenerated layers move with the pinned entry",
+    Boolean(
+      afterMove &&
+        movedLayer &&
+        Math.abs(movedLayer.x - afterMove.x) < 0.002 &&
+        Math.abs(movedLayer.y - afterMove.y) < 0.002,
+    ),
+    `layer=(${movedLayer?.x?.toFixed(3)},${movedLayer?.y?.toFixed(3)})`,
+  );
+
+  // undo rename / move
+  await page.locator('[data-testid="place-list-item-' + addedId + '"]').click();
+  await page.waitForTimeout(120);
+  await page.locator('[data-testid="place-rename"]').click();
+  await page.locator('[data-testid="place-rename-input"]').fill("临时名");
+  await page.locator('[data-testid="place-rename-commit"]').click();
+  await waitIdle(page);
+  await page.keyboard.press("Control+z");
+  await waitIdle(page);
+  check(
+    "undo reverts a place rename",
+    (await page.evaluate(
+      (id) => window.__atlasDebug.getDocument().settlements.find((entry) => entry.id === id)?.name,
+      addedId,
+    )) === "雾岭港",
+  );
+  await page.keyboard.press("Control+z");
+  await waitIdle(page);
+  const afterMoveUndo = await page.evaluate(
+    (id) => window.__atlasDebug.getDocument().settlements.find((entry) => entry.id === id),
+    addedId,
+  );
+  check(
+    "undo reverts a place move",
+    Boolean(
+      afterMoveUndo &&
+        beforeMove &&
+        Math.abs(afterMoveUndo.x - beforeMove.x) < 1e-6 &&
+        Math.abs(afterMoveUndo.y - beforeMove.y) < 1e-6,
+    ),
+    `x=${afterMoveUndo?.x?.toFixed(4)} vs ${beforeMove?.x?.toFixed(4)}`,
+  );
+  await page.keyboard.press("Control+Shift+z");
+  await waitIdle(page);
+
+  // hide -> hidden list -> restore
+  await page.locator(`[data-testid="place-list-item-${addedId}"]`).click();
+  await page.waitForTimeout(120);
+  await page.locator('[data-testid="place-hide"]').click();
+  await page.waitForFunction(
+    (id) => window.__atlasDebug.getLayers()?.settlements?.some((entry) => entry.id === id) === false,
+    addedId,
+    { timeout: 30_000, polling: 100 },
+  );
+  await waitIdle(page);
+  const afterHide = await summary(page);
+  check(
+    "hide writes the id into overrides.hiddenIds",
+    afterHide.places.hiddenIds.includes(addedId),
+    JSON.stringify(afterHide.places.hiddenIds.slice(-3)),
+  );
+  check(
+    "hidden place disappears from layers.settlements",
+    (await page.evaluate(
+      (id) => window.__atlasDebug.getLayers().settlements.some((entry) => entry.id === id),
+      addedId,
+    )) === false,
+  );
+  await screenshot(page, "06d-place-hidden.png");
+  check(
+    "hidden list shows the entry for restore",
+    (await page.locator(`[data-testid="place-hidden-item-${addedId}"]`).count()) === 1,
+  );
+  const layersHiddenSupport = await page.evaluate(() => {
+    const hidden = window.__atlasDebug.getLayers().hidden;
+    return hidden && Array.isArray(hidden.settlements) ? "supported" : "missing";
+  });
+  if (layersHiddenSupport === "supported") {
+    check(
+      "layers.hidden carries the hidden settlement data",
+      (await page.evaluate(
+        (id) => window.__atlasDebug.getLayers().hidden.settlements.some((entry) => entry.id === id),
+        addedId,
+      )) === true,
+    );
+  } else {
+    log("layers.hidden not present yet in this core build; UI fallback list verified");
+  }
+  await page.locator(`[data-testid="place-hidden-item-${addedId}"] [data-testid="place-restore"]`).click();
+  await page.waitForFunction(
+    (id) => window.__atlasDebug.getLayers()?.settlements?.some((entry) => entry.id === id) === true,
+    addedId,
+    { timeout: 30_000, polling: 100 },
+  );
+  await waitIdle(page);
+  const afterRestore = await summary(page);
+  check(
+    "restore removes the id from hiddenIds",
+    !afterRestore.places.hiddenIds.includes(addedId),
+  );
+  check(
+    "restored place is back in layers.settlements",
+    (await page.evaluate(
+      (id) => window.__atlasDebug.getLayers().settlements.some((entry) => entry.id === id),
+      addedId,
+    )) === true,
+  );
+
+  // generated entries: hide -> layers.hidden -> restore
+  const generatedSettlement = (await summary(page)).places.list.find(
+    (entry) => entry.entity === "settlement" && !entry.userAdded,
+  );
+  if (generatedSettlement) {
+    await page.locator(`[data-testid="place-list-item-${generatedSettlement.id}"]`).click();
+    await page.waitForTimeout(150);
+    await page.locator('[data-testid="place-hide"]').click();
+    await waitIdle(page);
+    check(
+      "hiding a generated settlement hides it and lists it for restore",
+      (await page.evaluate(
+        (id) => window.__atlasDebug.getLayers().settlements.some((entry) => entry.id === id),
+        generatedSettlement.id,
+      )) === false &&
+        (await page.locator(`[data-testid="place-hidden-item-${generatedSettlement.id}"]`).count()) === 1,
+    );
+    const generatedHiddenLayer = await page.evaluate((id) => {
+      const hidden = window.__atlasDebug.getLayers().hidden;
+      if (!hidden || !Array.isArray(hidden.settlements)) return "missing";
+      const entry = hidden.settlements.find((item) => item.id === id);
+      return entry ? { name: entry.name } : null;
+    }, generatedSettlement.id);
+    check(
+      "layers.hidden carries generated hidden entries with their data",
+      typeof generatedHiddenLayer === "object" &&
+        generatedHiddenLayer !== null &&
+        typeof generatedHiddenLayer.name === "string" &&
+        generatedHiddenLayer.name.length > 0,
+      JSON.stringify(generatedHiddenLayer),
+    );
+    await page
+      .locator(`[data-testid="place-hidden-item-${generatedSettlement.id}"] [data-testid="place-restore"]`)
+      .click();
+    await page.waitForFunction(
+      (id) => window.__atlasDebug.getLayers()?.settlements?.some((entry) => entry.id === id) === true,
+      generatedSettlement.id,
+      { timeout: 30_000, polling: 100 },
+    );
+    await waitIdle(page);
+    check(
+      "restoring a generated settlement puts it back into layers",
+      (await page.evaluate(
+        (id) => window.__atlasDebug.getLayers().settlements.some((entry) => entry.id === id),
+        generatedSettlement.id,
+      )) === true,
+    );
+  }
+
+  // hide again + undo (undo must bring the place back)
+  await page.locator(`[data-testid="place-list-item-${addedId}"]`).click();
+  await page.waitForTimeout(120);
+  await page.locator('[data-testid="place-hide"]').click();
+  await waitIdle(page);
+  await page.keyboard.press("Control+z");
+  await waitIdle(page);
+  check(
+    "undo reverts hiding a place",
+    !(await summary(page)).places.hiddenIds.includes(addedId),
+  );
+
+  // place a label entry (auto-generated name)
+  await page.locator('[data-testid="place-mode-label"]').click();
+  await page.locator('[data-testid="place-kind-select"]').selectOption("water");
+  await page.locator('[data-testid="place-name-input"]').fill("");
+  await page.locator('[data-testid="place-add"]').click();
+  await clickCanvas(page, [0.35, 0.62]);
+  await waitIdle(page);
+  const userLabels = await page.evaluate(() =>
+    window.__atlasDebug
+      .getLayers()
+      .autoLabels.filter((label) => label.id.startsWith("user-l-"))
+      .map((label) => ({ id: label.id, text: label.text, kind: label.kind, pinned: label.pinned })),
+  );
+  check(
+    "placing a label creates a pinned user label with a generated name",
+    userLabels.length >= 1 &&
+      userLabels.some((label) => label.kind === "water" && label.pinned === true && label.text.length > 0),
+    JSON.stringify(userLabels),
+  );
+  const userLabelId = userLabels[0]?.id;
+  if (userLabelId) {
+    await page.locator(`[data-testid="place-list-item-${userLabelId}"]`).click();
+    await page.waitForTimeout(150);
+    await page.locator('[data-testid="place-delete"]').click();
+    await page.waitForFunction(
+      (id) => window.__atlasDebug.getLayers()?.autoLabels?.some((label) => label.id === id) === false,
+      userLabelId,
+      { timeout: 30_000, polling: 100 },
+    );
+    await waitIdle(page);
+    check(
+      "delete removes a user-added label from the document and layers",
+      (await page.evaluate(
+        (id) => window.__atlasDebug.getDocument().labels.some((label) => label.id === id),
+        userLabelId,
+      )) === false &&
+        (await page.evaluate(
+          (id) => window.__atlasDebug.getLayers().autoLabels.some((label) => label.id === id),
+          userLabelId,
+        )) === false,
+    );
+    await page.keyboard.press("Control+z");
+    await waitIdle(page);
+    check(
+      "undo reverts deleting a user-added label",
+      (await page.evaluate(
+        (id) => window.__atlasDebug.getDocument().labels.some((label) => label.id === id),
+        userLabelId,
+      )) === true,
+    );
+  }
+  await page.keyboard.press("v");
+  await page.waitForTimeout(120);
+
+  // ── 6d. seed round-trip keeps place edits ───────────────────────────
+  const placesBeforeSeed = await summary(page);
+  const userSettlementsBefore = placesBeforeSeed.places.userSettlements;
+
   // ── 6b. overrides survive seed changes; returning restores exactly ──
   log("seed round-trip with overrides");
   const beforeSeed = await summary(page);
@@ -576,6 +1008,15 @@ async function main() {
       restored.overrides.elevation === beforeSeed.overrides.elevation,
     `seed=${restored.seed}, land=${restored.layers?.landFraction}`,
   );
+  check(
+    "place edits survive seed changes and seed round-trips",
+    rerolled.places.userSettlements === placesBeforeSeed.places.userSettlements &&
+      rerolled.places.userLabels === placesBeforeSeed.places.userLabels &&
+      restored.places.userSettlements === placesBeforeSeed.places.userSettlements &&
+      restored.places.userLabels === placesBeforeSeed.places.userLabels &&
+      restored.places.list.some((entry) => entry.id === addedId && entry.name === "雾岭港"),
+    `settlements=${restored.places.userSettlements}/${placesBeforeSeed.places.userSettlements}`,
+  );
 
   // ── 7. pan / zoom without regeneration ─────────────────────────────
   await page.locator('[data-testid="tool-pan"]').click();
@@ -595,7 +1036,11 @@ async function main() {
   await page.locator('[data-testid="zoom-fit"]').click();
   await sleep(200);
   const afterFit = await summary(page);
-  check("fit button resets zoom", Math.abs(afterFit.view.scale - beforeZoom.view.scale) < 0.02, `scale=${afterFit.view.scale.toFixed(3)}`);
+  check(
+    "fit button resets zoom to the fitted scale",
+    Math.abs(afterFit.view.scale - initial.view.scale) < 0.02,
+    `fit=${afterFit.view.scale.toFixed(3)} initial=${initial.view.scale.toFixed(3)}`,
+  );
 
   // ── 8. JSON export ──────────────────────────────────────────────────
   const jsonDownloadPromise = page.waitForEvent("download", { timeout: 20_000 });
@@ -612,6 +1057,16 @@ async function main() {
       exported.overrides.elevation.length === exportedSummary.overrides.elevation &&
       exported.overrides.riverForce.length === exportedSummary.overrides.rivers,
     `seed=${exported.seed} elev=${exported.overrides.elevation.length} rivers=${exported.overrides.riverForce.length} biome=${exported.overrides.biome.length}`,
+  );
+  check(
+    "JSON export includes user places and hiddenIds",
+    Array.isArray(exported.settlements) &&
+      Array.isArray(exported.labels) &&
+      exported.settlements.length === exportedSummary.places.userSettlements &&
+      exported.labels.length === exportedSummary.places.userLabels &&
+      Array.isArray(exported.overrides.hiddenIds) &&
+      exported.settlements.some((entry) => entry.id === addedId && entry.pinned === true),
+    `settlements=${exported.settlements?.length} labels=${exported.labels?.length} hidden=${exported.overrides.hiddenIds?.length}`,
   );
 
   // ── 9. local PNG export via dialog ─────────────────────────────────
@@ -679,6 +1134,10 @@ async function main() {
       biome: document.overrides.biome.length,
       seaLevel: document.params.seaLevel,
       style: document.style,
+      settlements: document.settlements.length,
+      labels: document.labels.length,
+      hiddenIds: document.overrides.hiddenIds.length,
+      placeNames: document.settlements.map((entry) => entry.name).sort(),
     };
   });
   await page.reload({ waitUntil: "domcontentloaded" });
@@ -696,6 +1155,10 @@ async function main() {
       biome: document.overrides.biome.length,
       seaLevel: document.params.seaLevel,
       style: document.style,
+      settlements: document.settlements.length,
+      labels: document.labels.length,
+      hiddenIds: document.overrides.hiddenIds.length,
+      placeNames: document.settlements.map((entry) => entry.name).sort(),
     };
   });
   check(
@@ -745,6 +1208,14 @@ async function main() {
       afterImport.overrides.biome === exported.overrides.biome.length,
     `seed=${afterImport.seed} elev=${afterImport.overrides.elevation} rivers=${afterImport.overrides.rivers} biome=${afterImport.overrides.biome}`,
   );
+  check(
+    "JSON import restores user places and hiddenIds",
+    afterImport.places.userSettlements === exported.settlements.length &&
+      afterImport.places.userLabels === exported.labels.length &&
+      afterImport.places.hiddenIds.length === exported.overrides.hiddenIds.length &&
+      afterImport.places.list.some((entry) => entry.id === addedId && entry.name === "雾岭港"),
+    `settlements=${afterImport.places.userSettlements} labels=${afterImport.places.userLabels} hidden=${afterImport.places.hiddenIds.length}`,
+  );
   await screenshot(page, "11-imported.png");
 
   // ── 12b. legacy JSON without namingLanguage falls back to auto ─────
@@ -767,6 +1238,13 @@ async function main() {
       legacySummary.overrides.elevation === legacyJson.overrides.elevation.length,
     `namingLanguage=${legacySummary.namingLanguage}`,
   );
+  check(
+    "legacy JSON without hiddenIds/places fields imports without crashing",
+    Array.isArray((await page.evaluate(() => window.__atlasDebug.getDocument().overrides.hiddenIds))) &&
+      legacySummary.places.userSettlements === (legacyJson.settlements?.length ?? 0) &&
+      (await summary(page)).generation.phase !== "error",
+    `hiddenIds=${JSON.stringify(await page.evaluate(() => window.__atlasDebug.getDocument().overrides.hiddenIds))} settlements=${legacySummary.places.userSettlements}`,
+  );
 
   // ── 13. dialogs & shortcuts ────────────────────────────────────────
   await page.locator('[data-testid="help"]').click();
@@ -783,6 +1261,9 @@ async function main() {
   await page.keyboard.press("1");
   await sleep(100);
   check("shortcut 1 selects elevation tool", (await summary(page)).tool === "elevation");
+  await page.keyboard.press("4");
+  await sleep(120);
+  check("shortcut 4 selects places tool", (await summary(page)).tool === "places");
   await page.keyboard.press("v");
   check("shortcut V selects pan tool", (await summary(page)).tool === "pan");
   await page.keyboard.press("f");

@@ -27,7 +27,7 @@ export const MIN_ZOOM = 0.04;
 export const MAX_ZOOM = 16;
 
 // ── Tools ─────────────────────────────────────────────────────────────────
-export type ToolId = "pan" | "elevation" | "river" | "biome";
+export type ToolId = "pan" | "elevation" | "river" | "biome" | "places";
 
 export interface ToolDef {
   id: ToolId;
@@ -70,6 +70,14 @@ export const TOOLS: ToolDef[] = [
     shortcut: "3",
     hint: "选择群系后按住拖动涂抹 · 松开后重新生成",
     title: "群系画笔：涂抹指定群系（3）",
+  },
+  {
+    id: "places",
+    label: "地点",
+    icon: "◉",
+    shortcut: "4",
+    hint: "单击选中地点/地名 · 拖动定位 · 双击重命名 · 「放置」后点击地图新增",
+    title: "地点与地名编辑：选中、改名、拖动、隐藏、新增（4）",
   },
 ];
 
@@ -315,7 +323,7 @@ export const EXPORT_PRESETS: ExportPreset[] = [
 export const KEYBOARD_SHORTCUTS: { keys: string; action: string }[] = [
   { keys: "Ctrl / ⌘ + Z", action: "撤销上一步（按笔画/操作快照）" },
   { keys: "Ctrl / ⌘ + Shift + Z", action: "重做" },
-  { keys: "1 / 2 / 3", action: "切换海拔 / 河道 / 群系画笔" },
+  { keys: "1 / 2 / 3 / 4", action: "切换海拔 / 河道 / 群系 / 地点工具" },
   { keys: "V", action: "切换平移工具" },
   { keys: "Space（按住）", action: "临时进入平移模式" },
   { keys: "滚轮", action: "以光标为中心缩放地图" },
@@ -324,7 +332,10 @@ export const KEYBOARD_SHORTCUTS: { keys: string; action: string }[] = [
   { keys: "0", action: "1:1 像素还原" },
   { keys: "Ctrl / ⌘ + Enter", action: "立即按当前文档重新生成" },
   { keys: "回车 / 双击", action: "完成强制河道折线" },
+  { keys: "双击地点", action: "重命名选中的地点或地名" },
+  { keys: "拖动地点", action: "把地点/地名移动到新位置" },
   { keys: "Backspace", action: "删除河道最后一个节点" },
-  { keys: "Esc", action: "取消河道绘制 / 关闭弹窗" },
+  { keys: "Delete", action: "彻底删除选中的用户新增地点" },
+  { keys: "Esc", action: "取消放置/重命名/选中，或取消河道、关闭弹窗" },
   { keys: "?", action: "打开本帮助" },
 ];

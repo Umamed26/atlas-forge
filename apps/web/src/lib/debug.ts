@@ -7,6 +7,7 @@
  */
 import { BASE_RENDER_SIZE } from "./constants";
 import { countOverrides } from "./documentIO";
+import { collectPlaces, type PlaceEntry } from "./places";
 import { useViewStore } from "../state/viewStore";
 import { useWorldStore } from "../state/worldStore";
 
@@ -53,6 +54,22 @@ export interface AtlasDebugSummary {
   save: { phase: string; savedAt: number | null; error: string | null };
   server: { phase: string; latencyMs: number | null; maxSize: number | null };
   autosaveRestored: boolean;
+  places: {
+    selected: { id: string; entity: string } | null;
+    renaming: { id: string; entity: string } | null;
+    armed: boolean;
+    mode: string;
+    settlementKind: string;
+    labelKind: string;
+    nameDraft: string;
+    visibleSettlements: number;
+    visibleLabels: number;
+    hiddenCount: number;
+    hiddenIds: string[];
+    userSettlements: number;
+    userLabels: number;
+    list: Pick<PlaceEntry, "id" | "entity" | "name" | "type" | "x" | "y" | "pinned" | "userAdded" | "hidden">[];
+  };
 }
 
 export interface AtlasDebugApi {
@@ -78,6 +95,10 @@ function buildSummary(): AtlasDebugSummary {
   const state = useWorldStore.getState();
   const view = useViewStore.getState();
   const layers = state.layers;
+  const placeCollections = collectPlaces(state.document, layers);
+  const visibleSettlements = placeCollections.visible.filter(
+    (entry) => entry.entity === "settlement",
+  );
   return {
     version: "m6",
     name: state.document.name,
@@ -145,6 +166,32 @@ function buildSummary(): AtlasDebugSummary {
       maxSize: state.server.maxSize,
     },
     autosaveRestored: state.restoredFromAutosave,
+    places: {
+      selected: state.selectedPlace ? { ...state.selectedPlace } : null,
+      renaming: state.placeRename ? { ...state.placeRename } : null,
+      armed: state.placeTool.armed,
+      mode: state.placeTool.mode,
+      settlementKind: state.placeTool.settlementKind,
+      labelKind: state.placeTool.labelKind,
+      nameDraft: state.placeTool.name,
+      visibleSettlements: visibleSettlements.length,
+      visibleLabels: placeCollections.visible.length - visibleSettlements.length,
+      hiddenCount: placeCollections.hidden.length,
+      hiddenIds: [...placeCollections.hiddenIds],
+      userSettlements: state.document.settlements?.length ?? 0,
+      userLabels: state.document.labels?.length ?? 0,
+      list: placeCollections.visible.map((entry) => ({
+        id: entry.id,
+        entity: entry.entity,
+        name: entry.name,
+        type: entry.type,
+        x: entry.x,
+        y: entry.y,
+        pinned: entry.pinned,
+        userAdded: entry.userAdded,
+        hidden: entry.hidden,
+      })),
+    },
   };
 }
 

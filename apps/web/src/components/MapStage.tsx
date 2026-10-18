@@ -10,14 +10,23 @@
  * All edit coordinates are normalized world space [0,1] and are committed into
  * document.overrides; nothing here is view-dependent persistence.
  */
-import { useCallback, useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type MouseEvent as ReactMouseEvent,
+  type PointerEvent as ReactPointerEvent,
+} from "react";
 import {
   BIOME_NAMES,
   PIPELINE_STAGE_LABELS,
   type BiomeId,
   type BiomeStamp,
   type ElevationStamp,
+  type LabelKind,
   type PipelineStage,
+  type SettlementKind,
 } from "@atlas/core";
 
 import {
@@ -29,6 +38,16 @@ import {
   TOOLS,
   type ToolId,
 } from "../lib/constants";
+import {
+  collectPlaces,
+  findPlace,
+  LABEL_KIND_META,
+  LABEL_KINDS,
+  placeTypeIcon,
+  SETTLEMENT_KIND_META,
+  SETTLEMENT_KINDS,
+  type PlaceEntry,
+} from "../lib/places";
 import { clamp01, formatMs, isEditableTarget } from "../lib/utils";
 import { screenToWorld, useViewStore } from "../state/viewStore";
 import { useWorldStore, type BrushState } from "../state/worldStore";
@@ -52,6 +71,22 @@ interface StrokeSession {
 }
 
 type StampPoint = { x: number; y: number };
+
+interface PlaceDragSession {
+  pointerId: number;
+  entry: PlaceEntry;
+  startX: number;
+  startY: number;
+  currentWorld: { x: number; y: number };
+  moved: boolean;
+}
+
+interface DragGhostState {
+  x: number;
+  y: number;
+  name: string;
+  entity: PlaceEntry["entity"];
+}
 
 function makeElevationStamp(point: StampPoint, brush: BrushState): ElevationStamp {
   const value =
@@ -138,6 +173,7 @@ function ToolOptions() {
   const tool = useWorldStore((state) => state.tool);
   const brush = useWorldStore((state) => state.brush);
   const draft = useWorldStore((state) => state.riverDraft);
+  const placeTool = useWorldStore((state) => state.placeTool);
   const store = useWorldStore.getState();
 
   if (tool === "pan") {
@@ -246,6 +282,95 @@ function ToolOptions() {
         >
           取消
         </button>
+      </div>
+    );
+  }
+
+
+  if (tool === "places") {
+    const kindOptions =
+      placeTool.mode === "settlement"
+        ? SETTLEMENT_KINDS.map((kind) => ({
+            value: kind,
+            label: SETTLEMENT_KIND_META[kind].label,
+          }))
+        : LABEL_KINDS.map((kind) => ({ value: kind, label: LABEL_KIND_META[kind].label }));
+    const currentKind =
+      placeTool.mode === "settlement" ? placeTool.settlementKind : placeTool.labelKind;
+    return (
+      <div className="tool-options place-options">
+        <div className="segmented" role="group" aria-label="放置类型">
+          <button
+            type="button"
+            className={`segmented-button ${placeTool.mode === "settlement" ? "is-active" : ""}`}
+            aria-pressed={placeTool.mode === "settlement"}
+            data-testid="place-mode-settlement"
+            onClick={() => useWorldStore.getState().setPlaceMode("settlement")}
+          >
+            地点
+          </button>
+          <button
+            type="button"
+            className={`segmented-button ${placeTool.mode === "label" ? "is-active" : ""}`}
+            aria-pressed={placeTool.mode === "label"}
+            data-testid="place-mode-label"
+            onClick={() => useWorldStore.getState().setPlaceMode("label")}
+          >
+            标注
+          </button>
+        </div>
+        <label className="mini-select">
+          <span className="mini-label">类型</span>
+          <select
+            aria-label="地点类型"
+            data-testid="place-kind-select"
+            value={currentKind}
+            onChange={(event) => {
+              const value = event.target.value;
+              if (placeTool.mode === "settlement") {
+                useWorldStore.getState().setPlaceSettlementKind(value as SettlementKind);
+              } else {
+                useWorldStore.getState().setPlaceLabelKind(value as LabelKind);
+              }
+            }}
+          >
+            {kindOptions.map((option) => (
+              <option key={option.value} value={option.value}>
+                {option.label}
+              </option>
+            ))}
+          </select>
+        </label>
+        <input
+          type="text"
+          className="place-name-input"
+          aria-label="新地点名称"
+          data-testid="place-name-input"
+          placeholder="名称（留空自动生成）"
+          maxLength={80}
+          value={placeTool.name}
+          onChange={(event) => useWorldStore.getState().setPlaceName(event.target.value)}
+        />
+        <button
+          type="button"
+          className={`btn btn--small ${placeTool.armed ? "btn--primary" : ""}`}
+          aria-pressed={placeTool.armed}
+          data-testid="place-add"
+          onClick={() => useWorldStore.getState().togglePlaceArmed()}
+        >
+          {placeTool.armed ? "点击地图放置…" : "放置"}
+        </button>
+        {placeTool.armed ? (
+          <button
+            type="button"
+            className="btn btn--small btn--ghost"
+            data-testid="place-placement-cancel"
+            onClick={() => useWorldStore.getState().disarmPlacement()}
+          >
+            取消放置
+          </button>
+        ) : null}
+        <span className="tool-options-hint">单击选中 · 拖动定位 · 双击改名 · Esc 取消</span>
       </div>
     );
   }
@@ -435,6 +560,9 @@ export function MapStage() {
   const strokeRef = useRef<StrokeSession | null>(null);
   const spaceRef = useRef(false);
 
+  const hoveredPlaceRef = useRef<PlaceEntry | null>(null);
+  const placeDragRef = useRef<PlaceDragSession | null>(null);
+  const [dragGhost, setDragGhost] = useState<DragGhostState | null>(null);
   const [spaceDown, setSpaceDown] = useState(false);
   const [panning, setPanning] = useState(false);
 
@@ -444,6 +572,8 @@ export function MapStage() {
   const riverForce = useWorldStore((state) => state.document.overrides.riverForce);
   const baseVersion = useWorldStore((state) => state.render.baseVersion);
   const scale = useViewStore((state) => state.scale);
+  const selectedPlace = useWorldStore((state) => state.selectedPlace);
+  const placeArmed = useWorldStore((state) => state.placeTool.armed);
 
   // ── draw ────────────────────────────────────────────────────────────
   const draw = useCallback(() => {
@@ -596,7 +726,11 @@ export function MapStage() {
     // Brush cursor / preview circle.
     const pointer = pointerRef.current;
     const canPreview =
-      pointer.inside && world.tool !== "pan" && world.tool !== "river" && !spaceRef.current;
+      pointer.inside &&
+      world.tool !== "pan" &&
+      world.tool !== "river" &&
+      world.tool !== "places" &&
+      !spaceRef.current;
     if (canPreview) {
       const radius = Math.max(2.5, world.brush.radius * mapPx);
       let strokeColor = "rgba(217, 181, 108, 0.95)";
@@ -638,6 +772,93 @@ export function MapStage() {
       overlayCtx.lineTo(pointer.x, pointer.y + 4);
       overlayCtx.stroke();
       overlayCtx.restore();
+    }
+
+    // ── Places editing overlay: selection / hover / drag / placement ──
+    if (world.tool === "places") {
+      const places = collectPlaces(world.document, world.layers).visible;
+      const selected = findPlace({ visible: places, hidden: [] }, world.selectedPlace);
+      const hovered = hoveredPlaceRef.current;
+      const drag = placeDragRef.current;
+
+      const drawPlaceRing = (entry: PlaceEntry, isSelected: boolean) => {
+        const center = toScreen(entry.x, entry.y);
+        const radius = isSelected ? 16 : 12;
+        overlayCtx.save();
+        overlayCtx.beginPath();
+        overlayCtx.arc(center.x, center.y, radius, 0, Math.PI * 2);
+        overlayCtx.fillStyle = isSelected
+          ? "rgba(220, 181, 109, 0.24)"
+          : "rgba(220, 181, 109, 0.12)";
+        overlayCtx.fill();
+        overlayCtx.strokeStyle = isSelected
+          ? "rgba(246, 237, 217, 0.95)"
+          : "rgba(220, 181, 109, 0.85)";
+        overlayCtx.lineWidth = isSelected ? 2.2 : 1.4;
+        if (!isSelected) overlayCtx.setLineDash([4, 3]);
+        overlayCtx.stroke();
+        overlayCtx.restore();
+
+        const labelText = `${placeTypeIcon(entry)} ${entry.name}`;
+        overlayCtx.save();
+        overlayCtx.font = '12px "EB Garamond", "Songti SC", "Microsoft YaHei", serif';
+        const plateWidth = overlayCtx.measureText(labelText).width + 16;
+        const plateHeight = 21;
+        const plateX = Math.min(
+          Math.max(8, center.x + radius + 8),
+          Math.max(8, cssWidth - plateWidth - 8),
+        );
+        const plateY = Math.max(8, center.y - plateHeight - 5);
+        overlayCtx.fillStyle = isSelected ? "rgba(30, 24, 16, 0.94)" : "rgba(18, 14, 9, 0.88)";
+        overlayCtx.strokeStyle = isSelected
+          ? "rgba(220, 181, 109, 0.9)"
+          : "rgba(87, 70, 46, 0.85)";
+        overlayCtx.lineWidth = 1;
+        overlayCtx.beginPath();
+        overlayCtx.rect(plateX, plateY, plateWidth, plateHeight);
+        overlayCtx.fill();
+        overlayCtx.stroke();
+        overlayCtx.fillStyle = "#f2e8d4";
+        overlayCtx.textBaseline = "middle";
+        overlayCtx.fillText(labelText, plateX + 8, plateY + plateHeight / 2 + 0.5);
+        overlayCtx.restore();
+      };
+
+      if (selected) drawPlaceRing(selected, true);
+      const hoveredIsSelected =
+        hovered &&
+        world.selectedPlace &&
+        hovered.id === world.selectedPlace.id &&
+        hovered.entity === world.selectedPlace.entity;
+      if (hovered && !hoveredIsSelected) drawPlaceRing(hovered, false);
+
+      if (drag && drag.moved) {
+        const center = toScreen(drag.currentWorld.x, drag.currentWorld.y);
+        overlayCtx.save();
+        overlayCtx.beginPath();
+        overlayCtx.arc(center.x, center.y, 18, 0, Math.PI * 2);
+        overlayCtx.strokeStyle = "rgba(157, 191, 138, 0.95)";
+        overlayCtx.setLineDash([5, 4]);
+        overlayCtx.lineWidth = 2;
+        overlayCtx.stroke();
+        overlayCtx.restore();
+      }
+
+      if (world.placeTool.armed) {
+        const cursor = pointerRef.current;
+        if (cursor.inside) {
+          overlayCtx.save();
+          overlayCtx.strokeStyle = "rgba(157, 191, 138, 0.95)";
+          overlayCtx.lineWidth = 1.2;
+          overlayCtx.beginPath();
+          overlayCtx.moveTo(cursor.x - 10, cursor.y);
+          overlayCtx.lineTo(cursor.x + 10, cursor.y);
+          overlayCtx.moveTo(cursor.x, cursor.y - 10);
+          overlayCtx.lineTo(cursor.x, cursor.y + 10);
+          overlayCtx.stroke();
+          overlayCtx.restore();
+        }
+      }
     }
   }, []);
 
@@ -699,7 +920,27 @@ export function MapStage() {
 
   useEffect(() => {
     requestDraw();
-  }, [requestDraw, tool, brush, riverDraft, riverForce, baseVersion]);
+  }, [
+    requestDraw,
+    tool,
+    brush,
+    riverDraft,
+    riverForce,
+    baseVersion,
+    selectedPlace,
+    placeArmed,
+  ]);
+
+  useEffect(() => {
+    const canvas = mapCanvasRef.current;
+    if (tool !== "places") {
+      hoveredPlaceRef.current = null;
+      if (canvas) canvas.style.cursor = "";
+    } else if (canvas) {
+      canvas.style.cursor = placeArmed ? "crosshair" : "default";
+    }
+    requestDraw();
+  }, [tool, placeArmed, requestDraw]);
 
   // ── wheel zoom (cursor anchored) ────────────────────────────────────
   useEffect(() => {
@@ -761,6 +1002,40 @@ export function MapStage() {
     return screenToWorld(x, y, view.scale, view.offsetX, view.offsetY, BASE_RENDER_SIZE);
   };
 
+  /** Distance-based hit test against merged settlement/label positions. The
+   *  radius is screen-space based so it stays usable at every zoom level. */
+  const hitTestPlace = (screenX: number, screenY: number): PlaceEntry | null => {
+    const state = useWorldStore.getState();
+    const view = useViewStore.getState();
+    const mapPx = BASE_RENDER_SIZE * view.scale;
+    if (!(mapPx > 0)) return null;
+    const worldX = (screenX - view.offsetX) / mapPx;
+    const worldY = (screenY - view.offsetY) / mapPx;
+    const visible = collectPlaces(state.document, state.layers).visible;
+    const baseThreshold = 16 / mapPx;
+    let best: PlaceEntry | null = null;
+    let bestScore = Number.POSITIVE_INFINITY;
+    for (const entry of visible) {
+      const limit = entry.entity === "settlement" ? baseThreshold : baseThreshold * 0.9;
+      const distance = Math.hypot(entry.x - worldX, entry.y - worldY);
+      if (distance > limit) continue;
+      const score = distance + (entry.entity === "label" ? baseThreshold * 0.35 : 0);
+      if (score < bestScore) {
+        best = entry;
+        bestScore = score;
+      }
+    }
+    return best;
+  };
+
+  const updatePlaceCursor = (hover: PlaceEntry | null) => {
+    const canvas = mapCanvasRef.current;
+    if (!canvas) return;
+    const state = useWorldStore.getState();
+    const desired = hover ? "pointer" : state.placeTool.armed ? "crosshair" : "default";
+    if (canvas.style.cursor !== desired) canvas.style.cursor = desired;
+  };
+
   const onPointerDown = (event: ReactPointerEvent<HTMLCanvasElement>) => {
     const canvas = mapCanvasRef.current;
     if (!canvas) return;
@@ -789,6 +1064,33 @@ export function MapStage() {
 
     event.preventDefault();
     const world = pointToWorld(point.x, point.y);
+
+    if (store.tool === "places") {
+      if (store.placeTool.armed) {
+        store.addPlaceAt(world.x, world.y);
+        hoveredPlaceRef.current = null;
+        requestDraw();
+        return;
+      }
+      const hit = hitTestPlace(point.x, point.y);
+      if (!hit) {
+        store.selectPlace(null);
+        hoveredPlaceRef.current = null;
+        requestDraw();
+        return;
+      }
+      store.selectPlace({ id: hit.id, entity: hit.entity });
+      placeDragRef.current = {
+        pointerId: event.pointerId,
+        entry: hit,
+        startX: point.x,
+        startY: point.y,
+        currentWorld: { x: hit.x, y: hit.y },
+        moved: false,
+      };
+      requestDraw();
+      return;
+    }
 
     if (store.tool === "river") {
       if (event.detail >= 2) {
@@ -826,6 +1128,28 @@ export function MapStage() {
       return;
     }
 
+    const placeDrag = placeDragRef.current;
+    if (placeDrag && placeDrag.pointerId === event.pointerId) {
+      const deltaX = point.x - placeDrag.startX;
+      const deltaY = point.y - placeDrag.startY;
+      if (!placeDrag.moved && Math.hypot(deltaX, deltaY) > 4) placeDrag.moved = true;
+      if (placeDrag.moved) {
+        const worldPoint = pointToWorld(point.x, point.y);
+        placeDrag.currentWorld = {
+          x: clamp01(worldPoint.x),
+          y: clamp01(worldPoint.y),
+        };
+        setDragGhost({
+          x: point.x,
+          y: point.y,
+          name: placeDrag.entry.name,
+          entity: placeDrag.entry.entity,
+        });
+      }
+      requestDraw();
+      return;
+    }
+
     const stroke = strokeRef.current;
     if (stroke && stroke.pointerId === event.pointerId) {
       const world = pointToWorld(point.x, point.y);
@@ -841,6 +1165,21 @@ export function MapStage() {
         }
       }
       requestDraw();
+      return;
+    }
+
+    if (useWorldStore.getState().tool === "places") {
+      const hit = hitTestPlace(point.x, point.y);
+      const previous = hoveredPlaceRef.current;
+      const changed =
+        (previous?.id ?? null) !== (hit?.id ?? null) ||
+        (previous?.entity ?? null) !== (hit?.entity ?? null);
+      if (changed) {
+        hoveredPlaceRef.current = hit;
+        requestDraw();
+      }
+      updatePlaceCursor(hit);
+      if (useWorldStore.getState().placeTool.armed) requestDraw();
       return;
     }
 
@@ -875,12 +1214,32 @@ export function MapStage() {
     }
     if (panRef.current?.pointerId === event.pointerId) finishPan();
     if (strokeRef.current?.pointerId === event.pointerId) finishStroke();
+    const placeDrag = placeDragRef.current;
+    if (placeDrag && placeDrag.pointerId === event.pointerId) {
+      placeDragRef.current = null;
+      setDragGhost(null);
+      if (placeDrag.moved) {
+        useWorldStore
+          .getState()
+          .movePlace(
+            placeDrag.entry.id,
+            placeDrag.entry.entity,
+            placeDrag.currentWorld.x,
+            placeDrag.currentWorld.y,
+          );
+      }
+      requestDraw();
+    }
     requestDraw();
   };
 
   const onPointerCancel = (event: ReactPointerEvent<HTMLCanvasElement>) => {
     if (panRef.current?.pointerId === event.pointerId) finishPan();
     if (strokeRef.current?.pointerId === event.pointerId) finishStroke();
+    if (placeDragRef.current?.pointerId === event.pointerId) {
+      placeDragRef.current = null;
+      setDragGhost(null);
+    }
     pointerRef.current.inside = false;
     requestDraw();
   };
@@ -891,13 +1250,26 @@ export function MapStage() {
   };
 
   const onPointerLeave = () => {
-    if (panRef.current || strokeRef.current) return;
+    if (panRef.current || strokeRef.current || placeDragRef.current) return;
     pointerRef.current.inside = false;
+    hoveredPlaceRef.current = null;
+    const canvas = mapCanvasRef.current;
+    if (canvas) canvas.style.cursor = "";
     requestDraw();
   };
 
-  const onDoubleClick = () => {
+  const onDoubleClick = (event: ReactMouseEvent<HTMLCanvasElement>) => {
     const store = useWorldStore.getState();
+    if (store.tool === "places") {
+      const point = localPoint(event);
+      const hit = hitTestPlace(point.x, point.y);
+      if (hit) {
+        store.selectPlace({ id: hit.id, entity: hit.entity });
+        store.beginPlaceRename(hit.id, hit.entity);
+        requestDraw();
+      }
+      return;
+    }
     if (store.tool === "river" && store.riverDraft.points.length >= 2) {
       store.commitRiverDraft();
       requestDraw();
@@ -911,7 +1283,9 @@ export function MapStage() {
       ? "cursor-grab"
       : tool === "river"
         ? "cursor-crosshair"
-        : "cursor-brush";
+        : tool === "places"
+          ? "cursor-place"
+          : "cursor-brush";
 
   return (
     <section className="stage" data-testid="map-stage" aria-label="地图画布">
@@ -962,6 +1336,19 @@ export function MapStage() {
           data-testid="brush-overlay"
           aria-hidden="true"
         />
+
+        {dragGhost ? (
+          <div
+            className={`place-drag-ghost place-drag-ghost--${dragGhost.entity}`}
+            data-testid="place-drag-ghost"
+            style={{ left: `${dragGhost.x}px`, top: `${dragGhost.y}px` }}
+          >
+            <span className="place-drag-ghost-icon" aria-hidden="true">
+              {dragGhost.entity === "settlement" ? "◉" : "❖"}
+            </span>
+            <span className="place-drag-ghost-name">{dragGhost.name}</span>
+          </div>
+        ) : null}
 
         <StageHint />
 

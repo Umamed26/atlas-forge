@@ -31,6 +31,8 @@ export interface ViewState {
   zoomBy(factor: number): void;
   setOffset(x: number, y: number): void;
   panBy(dx: number, dy: number): void;
+  /** Center a normalized world point, optionally zooming to a target scale. */
+  centerOn(worldX: number, worldY: number, targetScale?: number): void;
 }
 
 function fitScale(viewportW: number, viewportH: number, baseSize: number): number {
@@ -180,6 +182,31 @@ export const useViewStore = create<ViewState>()((set, get) => ({
   panBy(dx, dy) {
     const { offsetX, offsetY } = get();
     get().setOffset(offsetX + dx, offsetY + dy);
+  },
+
+  centerOn(worldX, worldY, targetScale) {
+    const { viewportW, viewportH, baseSize, scale } = get();
+    if (viewportW === 0 || viewportH === 0) return;
+    const nextScale = clampScale(
+      targetScale ?? Math.max(scale, 1),
+      viewportW,
+      viewportH,
+      baseSize,
+    );
+    const offset = clampOffset(
+      viewportW / 2 - clamp(worldX, 0, 1) * baseSize * nextScale,
+      viewportH / 2 - clamp(worldY, 0, 1) * baseSize * nextScale,
+      nextScale,
+      viewportW,
+      viewportH,
+      baseSize,
+    );
+    set({
+      scale: nextScale,
+      offsetX: offset.x,
+      offsetY: offset.y,
+      userAdjusted: true,
+    });
   },
 }));
 

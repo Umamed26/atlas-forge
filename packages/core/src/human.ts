@@ -40,6 +40,8 @@ export interface HumanInput {
 export interface HumanResult {
   settlements: Settlement[];
   autoLabels: MapLabel[];
+  /** Entries suppressed by overrides.hiddenIds, for the UI restore list. */
+  hidden: { settlements: Settlement[]; labels: MapLabel[] };
 }
 
 const NEIGHBOR_DX = [-1, 1, 0, 0, -1, 1, -1, 1] as const;
@@ -948,30 +950,52 @@ export function generateHuman(input: HumanInput): HumanResult {
   order.sort((a, b) => labelPriorities[b] - labelPriorities[a] || a - b);
   const orderedLabels = order.map((index) => autoLabels[index]);
 
-  // ── Overlay pinned user entries, filter hidden ids ─────────────────────
-  const hidden = new Set(overrides.hiddenIds ?? []);
-  const settlementMap = new Map<string, Settlement>();
-  for (const settlement of generatedSettlements) {
-    if (hidden.has(settlement.id)) continue;
-    settlementMap.set(settlement.id, settlement);
+  // ── Merge user entries, then apply hidden-first filtering ──────────────
+  //
+  // Merge order (also the order of `layers.hidden`): generated entries first in
+  // their stable generation order, then user entries. A user entry with the
+  // same id overrides the generated one in place (pinned wins, position kept);
+  // user-only ids (user-s-*, user-l-*) are appended. Map preserves insertion
+  // order and deduplicates by id, so both visible and hidden output are stable.
+  //
+  // Hidden wins over everything: an id in hiddenIds is removed from the visible
+  // layers whether it is generated, user-overridden or user-added, and the
+  // effective entry is exposed through layers.hidden so the UI can restore it.
+  const hiddenIds = new Set<string>();
+  for (const id of overrides.hiddenIds ?? []) {
+    if (typeof id === "string") hiddenIds.add(id);
   }
+
+  const settlementMap = new Map<string, Settlement>();
+  for (const settlement of generatedSettlements) settlementMap.set(settlement.id, settlement);
   for (const user of input.settlements ?? []) {
     if (!user || typeof user.id !== "string") continue;
     settlementMap.set(user.id, { ...user });
   }
   const labelMap = new Map<string, MapLabel>();
-  for (const label of orderedLabels) {
-    if (hidden.has(label.id)) continue;
-    labelMap.set(label.id, label);
-  }
+  for (const label of orderedLabels) labelMap.set(label.id, label);
   for (const user of input.labels ?? []) {
     if (!user || typeof user.id !== "string") continue;
     labelMap.set(user.id, { ...user });
   }
 
+  const settlements: Settlement[] = [];
+  const hiddenSettlements: Settlement[] = [];
+  for (const [id, settlement] of settlementMap) {
+    if (hiddenIds.has(id)) hiddenSettlements.push(settlement);
+    else settlements.push(settlement);
+  }
+  const visibleLabels: MapLabel[] = [];
+  const hiddenLabels: MapLabel[] = [];
+  for (const [id, label] of labelMap) {
+    if (hiddenIds.has(id)) hiddenLabels.push(label);
+    else visibleLabels.push(label);
+  }
+
   return {
-    settlements: Array.from(settlementMap.values()),
-    autoLabels: Array.from(labelMap.values()),
+    settlements,
+    autoLabels: visibleLabels,
+    hidden: { settlements: hiddenSettlements, labels: hiddenLabels },
   };
 }
 

@@ -1,11 +1,13 @@
 /**
  * Place names and settlement markers.
  *
- * Draws generated `layers.autoLabels`, user `document.labels` and settlement
- * labels with a serif cartographic style: uppercase letterspaced region names,
- * italic water names, paper-coloured halos and simple hand-drawn settlement
- * glyphs. Placement is collision-checked with `measureText`, so labels never
- * overflow the frame or stamp over the cartouche/compass/legend.
+ * Generated `layers.autoLabels` and user `document.labels` are merged by id
+ * first (user / pinned entries win, so an id is only ever drawn once), and
+ * settlements are merged the same way while honouring `hiddenIds`. The result
+ * is drawn with a serif cartographic style: uppercase letterspaced region
+ * names, italic water names, paper-coloured halos and simple hand-drawn
+ * settlement glyphs. Placement is collision-checked with `measureText`, so
+ * labels never overflow the frame or stamp over the cartouche/compass/legend.
  */
 import type { MapLabel, Settlement, WorldDocument, WorldLayers } from "@atlas/core";
 import type { Ctx2D } from "./canvas-types";
@@ -14,7 +16,7 @@ import { hash01, hashSigned } from "./noise";
 import type { Rect } from "./layout";
 import { hitsAny } from "./layout";
 import { sampleMask } from "./sampling";
-import { cssRgb, type RenderTheme } from "./style";
+import { cssRgb, resolveTheme, type RenderTheme } from "./style";
 
 export interface LabelOptions {
   width: number;
@@ -36,7 +38,9 @@ export interface LabelStats {
   fontFamily: string;
 }
 
-interface Drawable {
+export interface Drawable {
+  /** Stable content id (label id or settlement id). */
+  id: string;
   kind: MapLabel["kind"] | "settlement";
   text: string;
   x: number;
@@ -51,6 +55,104 @@ interface Drawable {
   pinned: boolean;
   /** Ocean (as opposed to lake/river) water label: placed in open water. */
   sea: boolean;
+}
+
+/**
+ * Ids hidden by the editor: `document.overrides.hiddenIds` plus the optional
+ * `layers.hidden` list produced by newer core versions. Older layers may not
+ * carry `hidden` at all, so the field is read structurally and treated as
+ * optional. Entries may be plain ids or objects carrying an `id`.
+ */
+function collectHiddenIds(document: WorldDocument, layers: WorldLayers): string[] {
+  const hidden = new Set<string>();
+  const collect = (list: unknown): void => {
+    if (!Array.isArray(list)) return;
+    for (const entry of list) {
+      if (typeof entry === "string") {
+        hidden.add(entry);
+      } else if (entry && typeof entry === "object") {
+        const id = (entry as { id?: unknown }).id;
+        if (typeof id === "string") hidden.add(id);
+      }
+    }
+  };
+  collect(document.overrides?.hiddenIds);
+  collect((layers as WorldLayers & { hidden?: unknown }).hidden);
+  return [...hidden];
+}
+
+export interface MergedMapContent {
+  /** Auto + user labels merged by id, user / pinned entries win. */
+  labels: MapLabel[];
+  /** Layer + user settlements merged by id, user / pinned entries win. */
+  settlements: Settlement[];
+  /** Union of `document.overrides.hiddenIds` and optional `layers.hidden`. */
+  hiddenIds: string[];
+}
+
+/**
+ * Merge generated and user-edited map content by id.
+ *
+ * - A label id present in both `layers.autoLabels` and `document.labels` is
+ *   returned exactly once, with the user document's version winning.
+ * - Settlements follow the same rule; hidden ids are removed from *both*
+ *   sources, so a hidden id accidentally re-appearing in `document.settlements`
+ *   cannot resurrect it on the map.
+ * - Missing / blank ids are kept distinct (they cannot be merged safely).
+ */
+export function mergeMapContent(document: WorldDocument, layers: WorldLayers): MergedMapContent {
+  const hiddenIds = collectHiddenIds(document, layers);
+  const hidden = new Set(hiddenIds);
+
+  const labels: MapLabel[] = [];
+  const labelIndex = new Map<string, number>();
+  const upsertLabel = (label: MapLabel | undefined, fallbackKey: string): void => {
+    if (!label) return;
+    const key = typeof label.id === "string" && label.id.length > 0 ? label.id : fallbackKey;
+    if (hidden.has(key)) return;
+    const existing = labelIndex.get(key);
+    if (existing === undefined) {
+      labelIndex.set(key, labels.length);
+      labels.push({ ...label, id: key });
+    } else {
+      // User / pinned entries replace the generated entry entirely.
+      labels[existing] = { ...label, id: key };
+    }
+  };
+  const autoLabels = layers.autoLabels ?? [];
+  for (let i = 0; i < autoLabels.length; i += 1) {
+    upsertLabel(autoLabels[i], `__auto_label_${i}`);
+  }
+  const userLabels = document.labels ?? [];
+  for (let i = 0; i < userLabels.length; i += 1) {
+    upsertLabel(userLabels[i], `__user_label_${i}`);
+  }
+
+  const settlements: Settlement[] = [];
+  const settlementIndex = new Map<string, number>();
+  const upsertSettlement = (settlement: Settlement | undefined, fallbackKey: string): void => {
+    if (!settlement) return;
+    const key =
+      typeof settlement.id === "string" && settlement.id.length > 0 ? settlement.id : fallbackKey;
+    if (hidden.has(key)) return;
+    const existing = settlementIndex.get(key);
+    if (existing === undefined) {
+      settlementIndex.set(key, settlements.length);
+      settlements.push({ ...settlement, id: key });
+    } else {
+      settlements[existing] = { ...settlement, id: key };
+    }
+  };
+  const layerSettlements = layers.settlements ?? [];
+  for (let i = 0; i < layerSettlements.length; i += 1) {
+    upsertSettlement(layerSettlements[i], `__layer_settlement_${i}`);
+  }
+  const userSettlements = document.settlements ?? [];
+  for (let i = 0; i < userSettlements.length; i += 1) {
+    upsertSettlement(userSettlements[i], `__user_settlement_${i}`);
+  }
+
+  return { labels, settlements, hiddenIds };
 }
 
 /** True when the normalized point sits on ocean/lake/river (labels avoid these). */
@@ -185,13 +287,21 @@ function inkedText(
 function collectDrawables(opts: LabelOptions): Drawable[] {
   const { document, layers, theme } = opts;
   const style = document.style;
-  const hidden = new Set(document.overrides?.hiddenIds ?? []);
+  const merged = mergeMapContent(document, layers);
+  const userLabelKeys = new Set<string>();
+  const userLabels = document.labels ?? [];
+  for (let i = 0; i < userLabels.length; i += 1) {
+    const label = userLabels[i];
+    if (!label) continue;
+    userLabelKeys.add(
+      typeof label.id === "string" && label.id.length > 0 ? label.id : `__user_label_${i}`,
+    );
+  }
   const drawn: Drawable[] = [];
   const density = Math.min(1, Math.max(0, style.labelDensity));
   const scale = opts.scale;
 
   const mapLabelToDrawable = (label: MapLabel, index: number, generated: boolean): Drawable | null => {
-    if (hidden.has(label.id)) return null;
     const text = (label.text ?? "").trim();
     if (!text) return null;
     if (!style.showLabels && label.kind !== "custom") return null;
@@ -227,6 +337,7 @@ function collectDrawables(opts: LabelOptions): Drawable[] {
     const cjk = CJK_RE.test(text);
     const uppercase = label.kind === "region" || label.kind === "mountain";
     return {
+      id: label.id,
       kind: label.kind,
       text,
       x: label.x,
@@ -245,22 +356,15 @@ function collectDrawables(opts: LabelOptions): Drawable[] {
     };
   };
 
-  const auto = layers.autoLabels ?? [];
-  for (let i = 0; i < auto.length; i += 1) {
-    const drawable = mapLabelToDrawable(auto[i], i, true);
-    if (drawable) drawn.push(drawable);
-  }
-  const userLabels = document.labels ?? [];
-  for (let i = 0; i < userLabels.length; i += 1) {
-    const drawable = mapLabelToDrawable(userLabels[i], i, false);
+  // mergeMapContent already deduped by id (user / pinned entries win) and
+  // removed hidden ids from both generated and user sources.
+  for (let i = 0; i < merged.labels.length; i += 1) {
+    const label = merged.labels[i];
+    const drawable = mapLabelToDrawable(label, i, !userLabelKeys.has(label.id));
     if (drawable) drawn.push(drawable);
   }
 
-  // User-pinned settlements override generated entries with the same id.
-  const settlements = new Map<string, Settlement>();
-  for (const settlement of layers.settlements ?? []) settlements.set(settlement.id, settlement);
-  for (const settlement of document.settlements ?? []) settlements.set(settlement.id, settlement);
-  const ordered = [...settlements.values()];
+  const ordered = merged.settlements.slice();
   ordered.sort((a, b) => (b.population ?? 0) - (a.population ?? 0));
   const maxMarkers = opts.quality === "export" ? 64 : 40;
   const markerCount = Math.min(maxMarkers, ordered.length);
@@ -287,6 +391,7 @@ function collectDrawables(opts: LabelOptions): Drawable[] {
       opts.quality === "preview" ? 11 * scale : 0,
     );
     drawn.push({
+      id: settlement.id,
       kind: "settlement",
       text: name,
       x: settlement.x,
@@ -305,6 +410,31 @@ function collectDrawables(opts: LabelOptions): Drawable[] {
 
   drawn.sort((a, b) => a.priority - b.priority);
   return drawn;
+}
+
+/**
+ * Resolve the drawable label list without touching a canvas. Exposed for tests
+ * and tooling that need to assert de-duplication / hidden filters without
+ * decoding a PNG.
+ */
+export function collectLabelDrawables(
+  document: WorldDocument,
+  layers: WorldLayers,
+  quality: "preview" | "export" = "preview",
+  scale = 1,
+): Drawable[] {
+  const theme = resolveTheme(document.style, quality);
+  return collectDrawables({
+    width: 1024,
+    height: 1024,
+    scale,
+    theme,
+    seed: (document.seed | 0) || 1,
+    quality,
+    document,
+    layers,
+    avoid: [],
+  });
 }
 
 /** Draw all labels and settlement markers. */

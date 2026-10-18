@@ -57,6 +57,28 @@ export function HelpDialog({ open, onClose }: HelpDialogProps) {
           </p>
         </section>
 
+        <section className="help-section help-section--wide">
+          <h3>地点与地名编辑</h3>
+          <ul className="help-bullets">
+            <li>
+              工具栏第 4 项「地点」或快捷键 <Kbd>4</Kbd>：单击地图上的地点 / 地名选中，
+              按住拖动可直接定位，双击进入改名（Enter 保存，Esc 取消）。
+            </li>
+            <li>
+              检查器支持 定位 / 重命名 / 隐藏；生成条目只能隐藏，用户新增条目可彻底删除。
+              隐藏条目写入 <code>overrides.hiddenIds</code>，可在左栏「地点与地名」的隐藏列表中恢复。
+            </li>
+            <li>
+              「放置」先选择 地点 / 标注 模式、类型与名称（留空自动生成），再点击地图落点；
+              新增条目使用稳定的 <code>user-s-</code> / <code>user-l-</code> id 并标记 pinned。
+            </li>
+            <li>
+              所有地点操作均进入撤销 / 重做栈，随世界 JSON 导出与浏览器自动保存；
+              重新生成、改种子再改回种子后编辑仍然保留。
+            </li>
+          </ul>
+        </section>
+
         <section className="help-section">
           <h3>快捷键</h3>
           <table className="shortcut-table">

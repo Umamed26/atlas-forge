@@ -138,6 +138,7 @@ interface BiomeCacheValue {
 interface HumanCacheValue {
   settlements: WorldLayers["settlements"];
   autoLabels: WorldLayers["autoLabels"];
+  hidden: NonNullable<WorldLayers["hidden"]>;
 }
 
 function arraysAlive(cells: number, arrays: (Float32Array | Uint8Array)[]): boolean {
@@ -362,6 +363,8 @@ export function createPipeline(): Pipeline {
       const outBiome = new Uint8Array(biomeResult.biome);
       const settlements = human.settlements.map((settlement) => ({ ...settlement }));
       const autoLabels = human.autoLabels.map((label) => ({ ...label }));
+      const hiddenSettlements = human.hidden.settlements.map((settlement) => ({ ...settlement }));
+      const hiddenLabels = human.hidden.labels.map((label) => ({ ...label }));
 
       const totalMs = nowMs() - startedAt;
       const stats: PipelineStats = {
@@ -390,6 +393,7 @@ export function createPipeline(): Pipeline {
         biome: outBiome,
         settlements,
         autoLabels,
+        hidden: { settlements: hiddenSettlements, labels: hiddenLabels },
         stats,
       };
     },

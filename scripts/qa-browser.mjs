@@ -303,6 +303,127 @@ async function main() {
     await sleep(250);
   }
 
+  // 5d. Places & labels editing (new feature): add -> rename -> undo/redo ->
+  //     drag -> hide -> restore -> add label.
+  let placeId = null;
+  try {
+    await page.locator('[data-testid="tool-places"]').click();
+    await page.locator('[data-testid="place-mode-settlement"]').click();
+    await page.locator('[data-testid="place-kind-select"]').selectOption("port");
+    await page.locator('[data-testid="place-add"]').click();
+    const pbox = await page.locator('[data-testid="map-canvas"]').boundingBox();
+    if (pbox) {
+      const spot = { x: pbox.x + pbox.width * 0.52, y: pbox.y + pbox.height * 0.55 };
+      await page.mouse.click(spot.x, spot.y);
+      await sleep(400);
+      await waitGenerated(page);
+
+      const findPlace = () =>
+        page.evaluate(() => {
+          const doc = globalThis.__atlasDebug?.getDocument?.() ?? null;
+          const settlements = doc?.settlements ?? [];
+          const user = settlements.find((entry) => String(entry.id).startsWith("user-s-"));
+          return user ? { id: user.id, name: user.name, x: user.x, y: user.y, pinned: user.pinned } : null;
+        });
+      let place = await findPlace();
+      notes.push(`places: created user settlement = ${JSON.stringify(place)}`);
+      if (place) {
+        placeId = place.id;
+        // Select it through the place list, then rename via the inspector.
+        await page.locator(`[data-testid="place-list-item-${placeId}"]`).click();
+        await page.locator('[data-testid="place-rename"]').click();
+        await page.locator('[data-testid="place-rename-input"]').fill("测试港");
+        await page.locator('[data-testid="place-rename-commit"]').click();
+        await sleep(300);
+        await waitGenerated(page);
+        let renamed = await findPlace();
+        notes.push(`places: rename -> ${JSON.stringify(renamed)}`);
+
+        // Undo then redo the rename.
+        await page.keyboard.press("Control+z");
+        await sleep(300);
+        await waitGenerated(page);
+        const undone = await findPlace();
+        await page.keyboard.press("Control+Shift+z");
+        await sleep(300);
+        await waitGenerated(page);
+        const redone = await findPlace();
+        notes.push(
+          `places: undo name=${undone?.name} redo name=${redone?.name}`,
+        );
+
+        // Drag the marker: derive its current screen position from the live view
+        // transform (clicking the list row may have re-centered the map).
+        const beforeDrag = await findPlace();
+        const viewState = await page.evaluate(() => globalThis.__atlasDebug?.getSummary?.()?.view ?? null);
+        if (beforeDrag && viewState) {
+          const markerX = pbox.x + viewState.offsetX + beforeDrag.x * viewState.baseSize * viewState.scale;
+          const markerY = pbox.y + viewState.offsetY + beforeDrag.y * viewState.baseSize * viewState.scale;
+          await page.mouse.move(markerX, markerY);
+          await page.mouse.down();
+          for (let i = 1; i <= 10; i += 1) {
+            await page.mouse.move(markerX + i * 6, markerY + i * 3);
+            await sleep(16);
+          }
+          await page.mouse.up();
+        } else {
+          notes.push("places: drag skipped (no place or view state)");
+        }
+        await sleep(400);
+        await waitGenerated(page);
+        const afterDrag = await findPlace();
+        const moved =
+          beforeDrag && afterDrag &&
+          (Math.abs(afterDrag.x - beforeDrag.x) > 0.002 || Math.abs(afterDrag.y - beforeDrag.y) > 0.002);
+        notes.push(`places: drag moved=${moved} from=(${beforeDrag?.x},${beforeDrag?.y}) to=(${afterDrag?.x},${afterDrag?.y})`);
+
+        // Hide then restore.
+        await page.locator(`[data-testid="place-list-item-${placeId}"]`).click();
+        await page.locator('[data-testid="place-hide"]').click();
+        await sleep(300);
+        await waitGenerated(page);
+        const hiddenState = await page.evaluate(() => {
+          const doc = globalThis.__atlasDebug?.getDocument?.() ?? null;
+          return doc?.overrides?.hiddenIds ?? [];
+        });
+        notes.push(`places: hiddenIds after hide = ${JSON.stringify(hiddenState)}`);
+        const row = page.locator(`[data-testid="place-hidden-item-${placeId}"]`);
+        if ((await row.count()) > 0) {
+          await row.locator('[data-testid="place-restore"]').click();
+          await sleep(300);
+          await waitGenerated(page);
+        } else {
+          notes.push("places: hidden restore row not found");
+        }
+        const restored = await page.evaluate((id) => {
+          const doc = globalThis.__atlasDebug?.getDocument?.() ?? null;
+          const ids = doc?.overrides?.hiddenIds ?? [];
+          const visible = (doc?.settlements ?? []).some((entry) => entry.id === id);
+          return { stillHidden: ids.includes(id), inDocument: visible };
+        }, placeId);
+        notes.push(`places: restore -> ${JSON.stringify(restored)}`);
+
+        // Add a label (region) at another spot.
+        await page.locator('[data-testid="place-mode-label"]').click();
+        await page.locator('[data-testid="place-kind-select"]').selectOption("region");
+        await page.locator('[data-testid="place-name-input"]').fill("测试之地");
+        await page.locator('[data-testid="place-add"]').click();
+        await page.mouse.click(pbox.x + pbox.width * 0.4, pbox.y + pbox.height * 0.38);
+        await sleep(400);
+        await waitGenerated(page);
+        const labelState = await page.evaluate(() => {
+          const doc = globalThis.__atlasDebug?.getDocument?.() ?? null;
+          const labels = doc?.labels ?? [];
+          return labels.find((entry) => String(entry.id).startsWith("user-l-")) ?? null;
+        });
+        notes.push(`places: user label = ${JSON.stringify(labelState)}`);
+        await shot(page, "05d-places-edited.png");
+      }
+    }
+  } catch (error) {
+    notes.push(`places flow failed: ${String(error)}`);
+  }
+
   // 6. Live debug document summary.
   let summary = null;
   try {
@@ -322,7 +443,12 @@ async function main() {
     await download.saveAs(path);
     exported = JSON.parse(readFileSync(path, "utf8"));
     notes.push(
-      `exported JSON version=${exported.version} seed=${exported.seed} overrides=${JSON.stringify({
+      `exported JSON version=${exported.version} seed=${exported.seed} places=${JSON.stringify({
+        settlements: exported.settlements?.length,
+        labels: exported.labels?.length,
+        hiddenIds: exported.overrides?.hiddenIds?.length,
+        pinned: (exported.settlements ?? []).filter((entry) => entry.pinned).length,
+      })} overrides=${JSON.stringify({
         elev: exported.overrides?.elevation?.length,
         river: exported.overrides?.riverForce?.length,
         biome: exported.overrides?.biome?.length,
@@ -420,8 +546,17 @@ async function main() {
     const same =
       before?.seed === after?.seed &&
       JSON.stringify(before?.overrides) === JSON.stringify(after?.overrides);
+    const placesAfterReload = await page.evaluate((id) => {
+      const doc = globalThis.__atlasDebug?.getDocument?.() ?? null;
+      return {
+        userSettlements: (doc?.settlements ?? []).filter((entry) => String(entry.id).startsWith("user-s-")).length,
+        userLabels: (doc?.labels ?? []).filter((entry) => String(entry.id).startsWith("user-l-")).length,
+        hiddenIds: (doc?.overrides?.hiddenIds ?? []).length,
+        restoredPlace: id ? (doc?.settlements ?? []).some((entry) => entry.id === id) : null,
+      };
+    }, placeId);
     notes.push(
-      `autosave restore: sameSeedAndOverrides=${same} seed=${after?.seed} editTotal=${after?.overrides?.total}`,
+      `autosave restore: sameSeedAndOverrides=${same} seed=${after?.seed} editTotal=${after?.overrides?.total} places=${JSON.stringify(placesAfterReload)}`,
     );
     await shot(page, "09-after-reload.png");
   } catch (error) {

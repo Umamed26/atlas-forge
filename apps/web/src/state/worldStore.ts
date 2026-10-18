@@ -16,6 +16,10 @@ import {
   type ProgressUpdate,
   type RenderStyle,
   type RiverForcePath,
+  type LabelKind,
+  type MapLabel,
+  type Settlement,
+  type SettlementKind,
   type WorldDocument,
   type WorldLayers,
   type WorldParams,
@@ -37,6 +41,17 @@ import {
   cloneDocumentForHistory,
   loadAutosave,
 } from "../lib/documentIO";
+import {
+  collectPlaces,
+  createUserLabel,
+  createUserSettlement,
+  generatePlaceName,
+  isUserPlaceId,
+  upsertLabel,
+  upsertSettlement,
+  type PlaceEntity,
+  type PlaceSelection,
+} from "../lib/places";
 import { clamp, clamp01, randomSeed, uid } from "../lib/utils";
 
 // ── Types ─────────────────────────────────────────────────────────────────
@@ -104,6 +119,16 @@ export interface RiverDraft {
   points: [number, number][];
 }
 
+export type { PlaceEntity, PlaceSelection } from "../lib/places";
+
+export interface PlaceToolState {
+  mode: PlaceEntity;
+  settlementKind: SettlementKind;
+  labelKind: LabelKind;
+  name: string;
+  armed: boolean;
+}
+
 export interface CommitOptions {
   history?: "push" | "pending" | "none";
   sim?: SimTrigger;
@@ -135,6 +160,9 @@ export interface WorldStore {
   tool: ToolId;
   brush: BrushState;
   riverDraft: RiverDraft;
+  selectedPlace: PlaceSelection | null;
+  placeTool: PlaceToolState;
+  placeRename: PlaceSelection | null;
   toast: ToastMessage | null;
 
   // ── document mutations ──
@@ -171,6 +199,23 @@ export interface WorldStore {
   addRiverPoint(x: number, y: number): void;
   undoRiverPoint(): void;
   clearRiverDraft(): void;
+
+  // ── places / labels editing ──
+  selectPlace(selection: PlaceSelection | null): void;
+  setPlaceMode(mode: PlaceEntity): void;
+  setPlaceSettlementKind(kind: SettlementKind): void;
+  setPlaceLabelKind(kind: LabelKind): void;
+  setPlaceName(name: string): void;
+  togglePlaceArmed(): void;
+  disarmPlacement(): void;
+  beginPlaceRename(id: string, entity: PlaceEntity): void;
+  cancelPlaceRename(): void;
+  renamePlace(id: string, entity: PlaceEntity, name: string): void;
+  movePlace(id: string, entity: PlaceEntity, x: number, y: number): void;
+  hidePlace(id: string): void;
+  restorePlace(id: string): void;
+  deletePlace(id: string, entity: PlaceEntity): void;
+  addPlaceAt(x: number, y: number): void;
 
   // ── generation lifecycle (called by the worker client) ──
   requestGeneration(mode: SimTrigger): void;
@@ -245,7 +290,37 @@ function makeToast(kind: ToastKind, text: string): ToastMessage {
   return { id: toastSeq, kind, text };
 }
 
-const TOOL_IDS = new Set<ToolId>(["pan", "elevation", "river", "biome"]);
+const TOOL_IDS = new Set<ToolId>(["pan", "elevation", "river", "biome", "places"]);
+
+function findSettlementEntry(
+  document: WorldDocument,
+  layers: WorldLayers | null,
+  id: string,
+): Settlement | null {
+  const fromLayers = layers?.settlements?.find((entry) => entry.id === id);
+  if (fromLayers) return fromLayers;
+  return (document.settlements ?? []).find((entry) => entry.id === id) ?? null;
+}
+
+function findLabelEntry(
+  document: WorldDocument,
+  layers: WorldLayers | null,
+  id: string,
+): MapLabel | null {
+  const fromLayers = layers?.autoLabels?.find((entry) => entry.id === id);
+  if (fromLayers) return fromLayers;
+  return (document.labels ?? []).find((entry) => entry.id === id) ?? null;
+}
+
+function findPlaceName(
+  document: WorldDocument,
+  layers: WorldLayers | null,
+  id: string,
+): string {
+  const collections = collectPlaces(document, layers);
+  const entry = [...collections.visible, ...collections.hidden].find((place) => place.id === id);
+  return entry?.name ?? "条目";
+}
 
 // ── Store ─────────────────────────────────────────────────────────────────
 
@@ -290,6 +365,15 @@ export const useWorldStore = create<WorldStore>()((set, get) => {
       riverWidth: 0.006,
     },
     riverDraft: { active: false, points: [] },
+    selectedPlace: null,
+    placeTool: {
+      mode: "settlement",
+      settlementKind: "city",
+      labelKind: "region",
+      name: "",
+      armed: false,
+    },
+    placeRename: null,
     toast: null,
 
     // ── history ────────────────────────────────────────────────────────
@@ -595,7 +679,17 @@ export const useWorldStore = create<WorldStore>()((set, get) => {
     // ── tools ──────────────────────────────────────────────────────────
     setTool: (tool) => {
       if (!TOOL_IDS.has(tool)) return;
-      set({ tool });
+      const state = get();
+      const patch: Partial<WorldStore> = { tool };
+      if (tool !== "river" && state.riverDraft.points.length > 0) {
+        patch.riverDraft = { active: false, points: [] };
+      }
+      if (tool !== "places") {
+        patch.selectedPlace = null;
+        patch.placeRename = null;
+        patch.placeTool = { ...state.placeTool, armed: false };
+      }
+      set(patch);
     },
 
     setBrush: (patch) => {
@@ -638,6 +732,212 @@ export const useWorldStore = create<WorldStore>()((set, get) => {
 
     clearRiverDraft: () => {
       set({ riverDraft: { active: false, points: [] } });
+    },
+
+    // ── places / labels editing ────────────────────────────────────────
+    selectPlace: (selection) => {
+      set({ selectedPlace: selection, placeRename: null });
+    },
+
+    setPlaceMode: (mode) => {
+      set((state) => ({
+        placeTool: { ...state.placeTool, mode, armed: false },
+        placeRename: null,
+      }));
+    },
+
+    setPlaceSettlementKind: (kind) => {
+      set((state) => ({
+        placeTool: { ...state.placeTool, settlementKind: kind, armed: false },
+      }));
+    },
+
+    setPlaceLabelKind: (kind) => {
+      set((state) => ({ placeTool: { ...state.placeTool, labelKind: kind, armed: false } }));
+    },
+
+    setPlaceName: (name) => {
+      set((state) => ({
+        placeTool: { ...state.placeTool, name: name.slice(0, MAX_NAME_LENGTH) },
+      }));
+    },
+
+    togglePlaceArmed: () => {
+      set((state) => ({ placeTool: { ...state.placeTool, armed: !state.placeTool.armed } }));
+      if (get().placeTool.armed) {
+        get().pushToast("info", "点击地图任意位置放置；Esc 取消");
+      }
+    },
+
+    disarmPlacement: () => {
+      set((state) => ({ placeTool: { ...state.placeTool, armed: false } }));
+    },
+
+    beginPlaceRename: (id, entity) => {
+      set({ selectedPlace: { id, entity }, placeRename: { id, entity } });
+    },
+
+    cancelPlaceRename: () => {
+      set({ placeRename: null });
+    },
+
+    renamePlace: (id, entity, name) => {
+      const trimmed = name.trim().slice(0, MAX_NAME_LENGTH);
+      if (trimmed.length === 0) {
+        get().pushToast("error", "名称不能为空");
+        return;
+      }
+      const { document, layers } = get();
+      if (entity === "settlement") {
+        const base = findSettlementEntry(document, layers, id);
+        if (!base) {
+          get().pushToast("error", "找不到该地点（可能已被删除）");
+          return;
+        }
+        const next: Settlement = { ...base, name: trimmed, pinned: true };
+        get().commitDocument(
+          { ...document, settlements: upsertSettlement(document.settlements ?? [], next) },
+          { history: "push", sim: "now" },
+        );
+      } else {
+        const base = findLabelEntry(document, layers, id);
+        if (!base) {
+          get().pushToast("error", "找不到该地名（可能已被删除）");
+          return;
+        }
+        const next: MapLabel = { ...base, text: trimmed, pinned: true };
+        get().commitDocument(
+          { ...document, labels: upsertLabel(document.labels ?? [], next) },
+          { history: "push", sim: "now" },
+        );
+      }
+      set({ placeRename: null, selectedPlace: { id, entity } });
+      get().pushToast("info", `已重命名为「${trimmed}」`);
+    },
+
+    movePlace: (id, entity, x, y) => {
+      const { document, layers } = get();
+      const px = clamp01(x);
+      const py = clamp01(y);
+      if (entity === "settlement") {
+        const base = findSettlementEntry(document, layers, id);
+        if (!base) return;
+        const next: Settlement = { ...base, x: px, y: py, pinned: true };
+        get().commitDocument(
+          { ...document, settlements: upsertSettlement(document.settlements ?? [], next) },
+          { history: "push", sim: "now" },
+        );
+      } else {
+        const base = findLabelEntry(document, layers, id);
+        if (!base) return;
+        const next: MapLabel = { ...base, x: px, y: py, pinned: true };
+        get().commitDocument(
+          { ...document, labels: upsertLabel(document.labels ?? [], next) },
+          { history: "push", sim: "now" },
+        );
+      }
+      set({ selectedPlace: { id, entity } });
+    },
+
+    hidePlace: (id) => {
+      const { document, layers } = get();
+      const hiddenIds = document.overrides.hiddenIds ?? [];
+      if (hiddenIds.includes(id)) return;
+      const name = findPlaceName(document, layers, id);
+      get().commitDocument(
+        {
+          ...document,
+          overrides: { ...document.overrides, hiddenIds: [...hiddenIds, id] },
+        },
+        { history: "push", sim: "now" },
+      );
+      set({ selectedPlace: null, placeRename: null });
+      get().pushToast("info", `已隐藏「${name}」，可在「隐藏与恢复」中找回`);
+    },
+
+    restorePlace: (id) => {
+      const { document, layers } = get();
+      const hiddenIds = document.overrides.hiddenIds ?? [];
+      if (!hiddenIds.includes(id)) return;
+      const name = findPlaceName(document, layers, id);
+      get().commitDocument(
+        {
+          ...document,
+          overrides: {
+            ...document.overrides,
+            hiddenIds: hiddenIds.filter((entry) => entry !== id),
+          },
+        },
+        { history: "push", sim: "now" },
+      );
+      get().pushToast("success", `已恢复「${name}」`);
+    },
+
+    deletePlace: (id, entity) => {
+      const { document, layers } = get();
+      const collections = collectPlaces(document, layers);
+      const entry = [...collections.visible, ...collections.hidden].find(
+        (place) => place.id === id && place.entity === entity,
+      );
+      const userAdded =
+        entry?.userAdded ?? isUserPlaceId(entity, id);
+      if (!userAdded) {
+        get().pushToast("error", "只有用户新增的地点/标注可以彻底删除；生成条目请使用隐藏");
+        return;
+      }
+      const hiddenIds = (document.overrides.hiddenIds ?? []).filter((entryId) => entryId !== id);
+      const overrides = { ...document.overrides, hiddenIds };
+      const next: WorldDocument =
+        entity === "settlement"
+          ? {
+              ...document,
+              settlements: (document.settlements ?? []).filter((place) => place.id !== id),
+              overrides,
+            }
+          : {
+              ...document,
+              labels: (document.labels ?? []).filter((place) => place.id !== id),
+              overrides,
+            };
+      get().commitDocument(next, { history: "push", sim: "now" });
+      set({ selectedPlace: null, placeRename: null });
+      get().pushToast("info", entry ? `已删除「${entry.name}」` : "已删除条目");
+    },
+
+    addPlaceAt: (x, y) => {
+      const { document, placeTool } = get();
+      const px = clamp01(x);
+      const py = clamp01(y);
+      if (placeTool.mode === "settlement") {
+        const kind = placeTool.settlementKind;
+        const name = placeTool.name.trim() || generatePlaceName("settlement", kind);
+        const entry = createUserSettlement(px, py, kind, name);
+        get().commitDocument(
+          {
+            ...document,
+            settlements: upsertSettlement(document.settlements ?? [], entry),
+          },
+          { history: "push", sim: "now" },
+        );
+        set({
+          selectedPlace: { id: entry.id, entity: "settlement" },
+          placeTool: { ...placeTool, armed: false, name: "" },
+        });
+        get().pushToast("success", `已添加地点「${entry.name}」：拖动定位，双击改名`);
+      } else {
+        const kind = placeTool.labelKind;
+        const name = placeTool.name.trim() || generatePlaceName("label", kind);
+        const entry = createUserLabel(px, py, kind, name);
+        get().commitDocument(
+          { ...document, labels: upsertLabel(document.labels ?? [], entry) },
+          { history: "push", sim: "now" },
+        );
+        set({
+          selectedPlace: { id: entry.id, entity: "label" },
+          placeTool: { ...placeTool, armed: false, name: "" },
+        });
+        get().pushToast("success", `已添加标注「${entry.text}」：拖动定位，双击改名`);
+      }
     },
 
     // ── generation lifecycle ───────────────────────────────────────────

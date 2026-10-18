@@ -13,6 +13,7 @@ import {
 import { countOverrides } from "../lib/documentIO";
 import { formatMs, formatPercent } from "../lib/utils";
 import { useWorldStore } from "../state/worldStore";
+import { PlacesPanel } from "./PlacesPanel";
 import { ScrollHint, Section, SelectField, SliderField, ToggleField, useScrollHint } from "./ui";
 
 function groupParamKeys(group: ParamGroupDef): (keyof typeof DEFAULT_PARAM_VALUES)[] {
@@ -65,8 +66,8 @@ export function ParamPanel() {
     <aside className="panel panel--params" aria-label="生成参数面板">
       <div className="panel-head">
         <div>
-          <h2>生成参数</h2>
-          <p className="panel-sub">拖动滑杆自动重算 · 松开立即生成</p>
+          <h2>世界编辑</h2>
+          <p className="panel-sub">地点与地名 · 生成参数 · 自动保存</p>
         </div>
         <button
           type="button"
@@ -80,6 +81,7 @@ export function ParamPanel() {
       </div>
 
       <div className="panel-scroll" ref={scroll.ref} data-testid="params-scroll">
+        <PlacesPanel />
         {PARAM_GROUPS.map((group) => (
           <Section
             key={group.id}

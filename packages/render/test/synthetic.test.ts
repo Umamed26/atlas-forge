@@ -11,6 +11,7 @@ import assert from "node:assert/strict";
 import { createCanvas, GlobalFonts } from "@napi-rs/canvas";
 import { createSyntheticWorld, type SyntheticWorld } from "../src/testing";
 import { renderWorld, type Ctx2D, type RenderStats } from "../src/index";
+import { collectLabelDrawables, mergeMapContent } from "../src/labels";
 import { installNodeFonts } from "../src/node-fonts";
 
 installNodeFonts(GlobalFonts, { quiet: true });
@@ -199,6 +200,174 @@ async function main(): Promise<void> {
     assert.ok(s.mountainGlyphs + s.forestGlyphs > 0, "expected relief glyphs on the fixture");
     assert.ok(s.riverCount > 0, "expected rivers on the fixture");
     results.push(`not blank: ${s.labelsDrawn} labels, ${s.riverCount} rivers, ${s.mountainGlyphs} peaks`);
+  }
+
+  // 9) Location / place-name editing semantics: labels are merged by id (user
+  //    and pinned entries win), hidden ids are filtered from generated *and*
+  //    user sources, and optional `layers.hidden` is tolerated.
+  {
+    const base = createSyntheticWorld({ size: 96, seed: 424242 });
+    const fullStyle = { ...base.document.style, labelDensity: 1 };
+    const baseline = collectLabelDrawables(
+      { ...base.document, style: fullStyle },
+      base.layers,
+      "preview",
+      1,
+    );
+    const autoIds = base.layers.autoLabels.map((label) => label.id);
+    assert.ok(autoIds.length >= 3, "fixture should expose several auto labels");
+
+    const overriddenId = autoIds[0];
+    const hiddenLabelId = autoIds[1];
+    const layerHiddenLabelId = autoIds[autoIds.length - 1];
+    const userOverride = {
+      id: overriddenId,
+      text: "Overridden Vale",
+      kind: "region" as const,
+      x: 0.77,
+      y: 0.31,
+      pinned: true,
+    };
+    const userAdded = {
+      id: "user-label-brand-new",
+      text: "Fresh Name",
+      kind: "custom" as const,
+      x: 0.63,
+      y: 0.82,
+    };
+    const documentWithEdits = {
+      ...base.document,
+      style: fullStyle,
+      overrides: { ...base.document.overrides, hiddenIds: [hiddenLabelId] },
+      labels: [userOverride, userAdded],
+    };
+    // Newer core may also report hidden entries in layers.hidden (objects or ids).
+    const layersWithHidden = {
+      ...base.layers,
+      hidden: [{ id: layerHiddenLabelId }],
+    } as unknown as typeof base.layers;
+
+    const merged = mergeMapContent(documentWithEdits, layersWithHidden);
+    assert.equal(
+      merged.labels.filter((label) => label.id === overriddenId).length,
+      1,
+      "same-id auto/user label must merge into a single entry",
+    );
+    const overridden = merged.labels.find((label) => label.id === overriddenId);
+    assert.ok(overridden, "overridden label missing");
+    assert.equal(overridden!.text, "Overridden Vale", "user label text must win");
+    assert.equal(overridden!.x, 0.77, "user label position must win");
+    assert.equal(overridden!.pinned, true);
+    assert.ok(!merged.labels.some((label) => label.id === hiddenLabelId), "hiddenId label still present");
+    assert.ok(
+      !merged.labels.some((label) => label.id === layerHiddenLabelId),
+      "layers.hidden label still present",
+    );
+    assert.ok(
+      merged.labels.some((label) => label.id === "user-label-brand-new"),
+      "user-added label missing from merge",
+    );
+
+    // Drawables: deduped ids are unique, no duplicate for the overridden id,
+    // hidden labels gone and the newly added label drawn.
+    const drawables = collectLabelDrawables(documentWithEdits, layersWithHidden, "preview", 1);
+    const drawableIds = drawables.map((drawable) => drawable.id);
+    assert.equal(new Set(drawableIds).size, drawableIds.length, "label drawables must not repeat ids");
+    assert.equal(drawables.filter((drawable) => drawable.id === overriddenId).length, 1);
+    assert.ok(!drawableIds.includes(hiddenLabelId), "hidden label was drawn");
+    assert.ok(!drawableIds.includes(layerHiddenLabelId), "layers.hidden label was drawn");
+    assert.ok(drawableIds.includes("user-label-brand-new"), "user-added label was not drawn");
+    // Expected: all auto labels except the two hidden ones (the overridden id
+    // still draws once) + the user-added label + the fixture settlements.
+    const expectedDrawables = autoIds.length - 2 + 1 + base.layers.settlements.length;
+    assert.equal(
+      drawables.length,
+      expectedDrawables,
+      `expected ${expectedDrawables} drawables after hiding 2 labels and adding 1`,
+    );
+    results.push(
+      `label merge: ${baseline.length}→${drawables.length} drawables (dedupe, 2 hidden, 1 added)`,
+    );
+
+    // Same scenario as core's merged-human output: the pinned user label is
+    // already present in layers.autoLabels *and* document.labels → one entry.
+    const coreMergedLayers = {
+      ...base.layers,
+      autoLabels: [...base.layers.autoLabels, { ...userOverride }],
+    };
+    const coreMerged = mergeMapContent({ ...base.document, labels: [userOverride] }, coreMergedLayers);
+    assert.equal(
+      coreMerged.labels.filter((label) => label.id === overriddenId).length,
+      1,
+      "core-merged pinned label drawn twice",
+    );
+
+    // Hiding a user / pinned label must suppress it as well.
+    const hiddenUserLabel = mergeMapContent(
+      {
+        ...documentWithEdits,
+        overrides: { ...documentWithEdits.overrides, hiddenIds: [overriddenId, hiddenLabelId] },
+      },
+      base.layers,
+    );
+    assert.ok(
+      !hiddenUserLabel.labels.some((label) => label.id === overriddenId),
+      "hiddenIds must also suppress user labels",
+    );
+
+    // Settlements: user override wins, hiddenIds filtered from both sources
+    // (including one re-sent from document.settlements), layers.hidden optional.
+    const baseSettlements = base.layers.settlements;
+    assert.ok(baseSettlements.length >= 3, "fixture should expose settlements");
+    const hiddenSettlementId = baseSettlements[1].id;
+    const overriddenSettlementId = baseSettlements[0].id;
+    const pinnedSettlement = {
+      ...baseSettlements[0],
+      name: "Aurelian Prime",
+      x: 0.61,
+      y: 0.47,
+      pinned: true,
+    };
+    const resurrectedHidden = { ...baseSettlements[1], name: "Should Never Appear" };
+    const editedDocument = {
+      ...base.document,
+      style: fullStyle,
+      overrides: { ...base.document.overrides, hiddenIds: [hiddenSettlementId] },
+      settlements: [pinnedSettlement, resurrectedHidden],
+    };
+    const mergedSettlements = mergeMapContent(editedDocument, base.layers); // layers.hidden absent
+    assert.equal(
+      mergedSettlements.settlements.length,
+      baseSettlements.length - 1,
+      "hidden settlement must be removed from the merged settlement list",
+    );
+    const pinnedMerged = mergedSettlements.settlements.find(
+      (settlement) => settlement.id === overriddenSettlementId,
+    );
+    assert.ok(pinnedMerged, "pinned settlement missing");
+    assert.equal(pinnedMerged!.name, "Aurelian Prime", "pinned settlement name must win");
+    assert.equal(pinnedMerged!.x, 0.61, "pinned settlement position must win");
+    assert.equal(pinnedMerged!.pinned, true);
+    assert.ok(
+      !mergedSettlements.settlements.some((settlement) => settlement.id === hiddenSettlementId),
+      "hidden settlement was resurrected by document.settlements",
+    );
+
+    const editedShot = render({ document: editedDocument, layers: base.layers }, 1024, 1024);
+    assertPng(editedShot.png, "edited document labels");
+    assert.equal(
+      editedShot.stats.settlements,
+      baseSettlements.length - 1,
+      "hidden settlement still counted as a drawn marker",
+    );
+    const pinnedDrawables = collectLabelDrawables(editedDocument, base.layers, "preview", 1);
+    const pinnedDrawable = pinnedDrawables.find((drawable) => drawable.id === overriddenSettlementId);
+    assert.ok(pinnedDrawable, "pinned settlement label drawable missing");
+    assert.equal(pinnedDrawable!.text, "Aurelian Prime");
+    assert.equal(pinnedDrawable!.x, 0.61);
+    results.push(
+      `settlement merge: hidden removed, pinned override wins (markers=${editedShot.stats.settlements})`,
+    );
   }
 
   void pixelStats;

@@ -130,7 +130,11 @@ export interface WorldOverrides {
   elevation: ElevationStamp[];
   riverForce: RiverForcePath[];
   biome: BiomeStamp[];
-  /** Generated label/settlement ids the user deleted. */
+  /**
+   * Settlement/label ids the user hid. Hiding takes priority over everything:
+   * it suppresses generated entries and pinned user entries alike; the filtered
+   * entries are returned in `WorldLayers.hidden` so the UI can restore them.
+   */
   hiddenIds: string[];
 }
 
@@ -212,6 +216,13 @@ export interface WorldLayers {
   biome: Uint8Array;
   settlements: Settlement[];
   autoLabels: MapLabel[];
+  /**
+   * Entries filtered out by `overrides.hiddenIds` (generated and pinned user
+   * entries alike), in stable merge order: generated entries first, then
+   * user-added ones, deduplicated by id. The UI uses this as its "hidden but
+   * restorable" list; removing the id from `hiddenIds` restores the entry.
+   */
+  hidden?: { settlements: Settlement[]; labels: MapLabel[] };
   stats: PipelineStats;
 }
 

@@ -17,7 +17,7 @@ void args; // --update is accepted for symmetry; this script always writes.
 
 console.log(
   `[visual] generating ${MATRIX.length} baselines from ${SCENARIOS.length} core SCENARIO_PRESETS ` +
-    `(512² plates, sha256 primary assertion + 0.15% pixel tolerance)`,
+    `(512² plates; judge: Δ>16 pixels ≤0.15% + 64² mean Δ≤3.0, sha256 informational)`,
 );
 const startedAt = performance.now();
 const result = generateBaselines();

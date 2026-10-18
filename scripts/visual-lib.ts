@@ -3,10 +3,18 @@
  * the qa:render append hook.
  *
  * The matrix is a fixed set of scenario-preset × seed combinations. Baseline
- * plates are rendered at 512² (sha256 is the primary assertion, pixel diff is
- * the auxiliary one) and stored together with 256² thumbnails, keeping the
- * committed baseline set around ~5MB. First-screen preset cards are rendered at
- * 1024² and downscaled to 256² for the web welcome screen.
+ * plates are rendered at 512² and stored together with 256² thumbnails, keeping
+ * the committed baseline set around ~5MB. First-screen preset cards are
+ * rendered at 1024² and downscaled to 256² for the web welcome screen.
+ *
+ * Comparison is deliberately tolerant of environment-level anti-aliasing /
+ * font-fallback differences (local Skia vs GitHub runner) while still catching
+ * real regressions:
+ *   1) per-pixel: a pixel counts as different only when a channel delta is > 16;
+ *      structural diff must stay <= 0.15% of pixels;
+ *   2) structural: both images are box-downsampled to 64×64 and the max channel
+ *      mean delta must stay <= 3.0 (catches global brightness / shifts);
+ *   3) sha256 is kept as a diagnostic reference, never a failure condition.
  *
  * Scenario data always comes from core's `SCENARIO_PRESETS` — no duplicated
  * parameter tables.
@@ -355,10 +363,22 @@ export function loadManifest(): BaselineManifest | null {
 }
 
 // ── pixel comparison (auxiliary to the sha256 assertion) ─────────────────
-export interface PixelDiff {
+/** Tolerant comparison thresholds (anti-aliasing / font-fallback safe). */
+export const CHANNEL_DELTA_TOLERANCE = 16;
+export const STRUCTURAL_DIFF_THRESHOLD = 0.0015; // 0.15% of pixels
+export const DOWNSAMPLED_DELTA_THRESHOLD = 3.0;
+export const DOWNSAMPLE_SIZE = 64;
+
+export interface VisualDiffMetrics {
   totalPixels: number;
+  /** Pixels where any RGB channel delta exceeds CHANNEL_DELTA_TOLERANCE. */
   diffPixels: number;
-  ratio: number;
+  /** diffPixels / totalPixels — must be <= STRUCTURAL_DIFF_THRESHOLD. */
+  structuralDiff: number;
+  /** Largest single-channel delta found (diagnostic; AA noise is usually < 16). */
+  maxChannelDelta: number;
+  /** Max channel mean delta after box-downsampling both images to 64×64. */
+  downsampledMaxDelta: number;
 }
 
 function canvasImageData(canvas: ReturnType<typeof createCanvas>): Uint8ClampedArray {
@@ -368,43 +388,126 @@ function canvasImageData(canvas: ReturnType<typeof createCanvas>): Uint8ClampedA
   return ctx.getImageData(0, 0, canvas.width, canvas.height).data;
 }
 
-/** Compare two PNG buffers pixel by pixel (any channel difference counts). */
-export async function comparePngPixels(
+async function decodePng(png: Buffer): Promise<{ width: number; height: number; data: Uint8ClampedArray }> {
+  const image = await loadImage(png);
+  const canvas = createCanvas(image.width, image.height);
+  const ctx = canvas.getContext("2d");
+  ctx.drawImage(image, 0, 0);
+  return { width: image.width, height: image.height, data: canvasImageData(canvas) };
+}
+
+/** True when tolerances pass (used by runVisualCompare and the self-test). */
+export function metricsPass(metrics: VisualDiffMetrics): boolean {
+  // Tiny epsilon so an exactly-+3 global brightness is still within the 3.0
+  // threshold despite floating-point mean rounding.
+  return (
+    metrics.structuralDiff <= STRUCTURAL_DIFF_THRESHOLD + 1e-9 &&
+    metrics.downsampledMaxDelta <= DOWNSAMPLED_DELTA_THRESHOLD + 1e-6
+  );
+}
+
+/**
+ * Tolerant visual comparison:
+ *  - per-pixel structural diff with a 16-level channel tolerance;
+ *  - 64×64 downsample mean-delta for global brightness / large displacement.
+ * sha256 equality is not required: AA differences between Skia versions and
+ * missing CJK fallback fonts produce <16 channel noise and cancel out in means.
+ */
+export async function comparePngStructural(
   baselinePng: Buffer,
   candidatePng: Buffer,
-): Promise<PixelDiff> {
-  const [baselineImage, candidateImage] = await Promise.all([loadImage(baselinePng), loadImage(candidatePng)]);
-  if (baselineImage.width !== candidateImage.width || baselineImage.height !== candidateImage.height) {
+): Promise<VisualDiffMetrics> {
+  const [baseline, candidate] = await Promise.all([decodePng(baselinePng), decodePng(candidatePng)]);
+  if (baseline.width !== candidate.width || baseline.height !== candidate.height) {
     return {
-      totalPixels: baselineImage.width * baselineImage.height,
-      diffPixels: baselineImage.width * baselineImage.height,
-      ratio: 1,
+      totalPixels: baseline.width * baseline.height,
+      diffPixels: baseline.width * baseline.height,
+      structuralDiff: 1,
+      maxChannelDelta: 255,
+      downsampledMaxDelta: 255,
     };
   }
-  const width = baselineImage.width;
-  const height = baselineImage.height;
-  const load = (image: Awaited<ReturnType<typeof loadImage>>): Uint8ClampedArray => {
-    const canvas = createCanvas(width, height);
-    const ctx = canvas.getContext("2d");
-    ctx.drawImage(image, 0, 0);
-    return canvasImageData(canvas);
-  };
-  const a = load(baselineImage);
-  const b = load(candidateImage);
+  const width = baseline.width;
+  const height = candidate.height;
+  const totalPixels = width * height;
+  const a = baseline.data;
+  const b = candidate.data;
+
+  const cells = DOWNSAMPLE_SIZE * DOWNSAMPLE_SIZE;
+  const sumsA = new Float64Array(cells * 3);
+  const sumsB = new Float64Array(cells * 3);
+  const counts = new Uint32Array(cells);
+  const xCell = new Int32Array(width);
+  for (let x = 0; x < width; x += 1) {
+    xCell[x] = Math.min(DOWNSAMPLE_SIZE - 1, Math.floor((x * DOWNSAMPLE_SIZE) / width));
+  }
+  const yCells = new Int32Array(height);
+  for (let y = 0; y < height; y += 1) {
+    yCells[y] = Math.min(DOWNSAMPLE_SIZE - 1, Math.floor((y * DOWNSAMPLE_SIZE) / height));
+  }
+
   let diffPixels = 0;
-  for (let i = 0; i < a.length; i += 4) {
-    if (a[i] !== b[i] || a[i + 1] !== b[i + 1] || a[i + 2] !== b[i + 2] || a[i + 3] !== b[i + 3]) {
-      diffPixels += 1;
+  let maxChannelDelta = 0;
+  for (let y = 0; y < height; y += 1) {
+    const cellRow = yCells[y] * DOWNSAMPLE_SIZE;
+    for (let x = 0; x < width; x += 1) {
+      const i = (y * width + x) * 4;
+      const dr = Math.abs(a[i] - b[i]);
+      const dg = Math.abs(a[i + 1] - b[i + 1]);
+      const db = Math.abs(a[i + 2] - b[i + 2]);
+      const pixelDelta = dr > dg ? (dr > db ? dr : db) : dg > db ? dg : db;
+      if (pixelDelta > maxChannelDelta) maxChannelDelta = pixelDelta;
+      if (pixelDelta > CHANNEL_DELTA_TOLERANCE) diffPixels += 1;
+
+      const cell = cellRow + xCell[x];
+      counts[cell] += 1;
+      sumsA[cell * 3] += a[i];
+      sumsA[cell * 3 + 1] += a[i + 1];
+      sumsA[cell * 3 + 2] += a[i + 2];
+      sumsB[cell * 3] += b[i];
+      sumsB[cell * 3 + 1] += b[i + 1];
+      sumsB[cell * 3 + 2] += b[i + 2];
     }
   }
-  return { totalPixels: width * height, diffPixels, ratio: diffPixels / (width * height) };
+
+  // Mean of the 64×64 block means per channel (empty blocks ignored).
+  const meanA = [0, 0, 0];
+  const meanB = [0, 0, 0];
+  let used = 0;
+  for (let cell = 0; cell < cells; cell += 1) {
+    const count = counts[cell];
+    if (count === 0) continue;
+    used += 1;
+    for (let c = 0; c < 3; c += 1) {
+      meanA[c] += sumsA[cell * 3 + c] / count;
+      meanB[c] += sumsB[cell * 3 + c] / count;
+    }
+  }
+  let downsampledMaxDelta = 0;
+  if (used > 0) {
+    for (let c = 0; c < 3; c += 1) {
+      const delta = Math.abs(meanA[c] / used - meanB[c] / used);
+      if (delta > downsampledMaxDelta) downsampledMaxDelta = delta;
+    }
+  }
+
+  return {
+    totalPixels,
+    diffPixels,
+    structuralDiff: diffPixels / totalPixels,
+    maxChannelDelta,
+    downsampledMaxDelta,
+  };
 }
 
 export interface CompareEntryResult {
   id: string;
   status: "ok" | "diff" | "missing-baseline" | "missing-entry";
+  /** Diagnostic reference only — never a failure condition (AA differences). */
   shaMatch: boolean;
-  diffRatio?: number;
+  structuralDiff?: number;
+  maxChannelDelta?: number;
+  downsampledMaxDelta?: number;
   thumbShaMatch?: boolean;
   metricsDelta?: Partial<Record<keyof BaselineMetrics, number>>;
   message?: string;
@@ -418,8 +521,6 @@ export interface CompareResult {
   entries: CompareEntryResult[];
   totalMs: number;
 }
-
-const DIFF_THRESHOLD = 0.0015; // 0.15% of pixels
 
 function metricsDelta(expected: BaselineMetrics, actual: BaselineMetrics): Partial<Record<keyof BaselineMetrics, number>> {
   const delta: Partial<Record<keyof BaselineMetrics, number>> = {};
@@ -436,7 +537,12 @@ export interface RunCompareOptions {
   log?: (line: string) => void;
 }
 
-/** Re-render the matrix and compare against the committed baseline manifest. */
+/**
+ * Re-render the matrix and compare against the committed baseline manifest.
+ * Pass/fail is based on tolerant structural metrics (16-level per-channel
+ * tolerance + 64×64 mean delta); sha256 equality is reported only as a
+ * diagnostic so CI font/AA differences between environments do not fail.
+ */
 export async function runVisualCompare(options: RunCompareOptions = {}): Promise<CompareResult> {
   const log = options.log ?? ((line: string) => console.log(line));
   const startedAt = performance.now();
@@ -468,32 +574,58 @@ export async function runVisualCompare(options: RunCompareOptions = {}): Promise
   for (const expected of manifest.entries) {
     const matrixEntry = matrixById.get(expected.id);
     if (!matrixEntry) {
-      results.push({ id: expected.id, status: "missing-entry", shaMatch: false });
+      results.push({ id: expected.id, status: "missing-entry", shaMatch: false, message: "matrix entry not found" });
       failures += 1;
       continue;
     }
     const rendered = renderEntry(matrixEntry, pipeline);
     const sha = sha256(rendered.png);
-    // sha256 is the primary assertion; per-pixel diff explains a mismatch.
+    // sha256 is recorded as a diagnostic reference only: anti-aliasing and font
+    // fallback differences across environments change hashes without changing
+    // the map. Failure is decided by the tolerant structural comparison below.
     const shaMatch = sha === expected.sha256;
     const thumbShaMatch = sha256(rendered.thumbPng) === expected.thumbSha256;
-    let diffRatio: number | undefined;
+    let structuralDiff: number | undefined;
+    let maxChannelDelta: number | undefined;
+    let downsampledMaxDelta: number | undefined;
     let message: string | undefined;
     let status: CompareEntryResult["status"] = "ok";
 
-    if (!shaMatch) {
+    if (shaMatch) {
+      // Identical bytes → no AA noise. Report zero metrics for a consistent
+      // per-entry diagnostic line in local and CI runs.
+      structuralDiff = 0;
+      maxChannelDelta = 0;
+      downsampledMaxDelta = 0;
+    } else {
       const baselineFile = join(BASELINE_DIR, `${expected.id}.png`);
       if (!existsSync(baselineFile)) {
         status = "missing-baseline";
         message = "baseline image missing on disk";
       } else {
-        const diff = await comparePngPixels(readFileSync(baselineFile), rendered.png);
-        diffRatio = diff.ratio;
-        status = diff.ratio > DIFF_THRESHOLD ? "diff" : "ok";
-        message =
-          status === "diff"
-            ? `${(diff.ratio * 100).toFixed(3)}% pixels differ (threshold 0.15%)`
-            : `sha changed but only ${(diff.ratio * 100).toFixed(4)}% pixels differ (within tolerance)`;
+        const diff = await comparePngStructural(readFileSync(baselineFile), rendered.png);
+        structuralDiff = diff.structuralDiff;
+        maxChannelDelta = diff.maxChannelDelta;
+        downsampledMaxDelta = diff.downsampledMaxDelta;
+        if (metricsPass(diff)) {
+          message =
+            `environmental AA noise within tolerance (sha differs; struct ${(diff.structuralDiff * 100).toFixed(4)}%, ` +
+            `ds ${diff.downsampledMaxDelta.toFixed(2)})`;
+        } else {
+          status = "diff";
+          const reasons: string[] = [];
+          if (diff.structuralDiff > STRUCTURAL_DIFF_THRESHOLD) {
+            reasons.push(
+              `structural diff ${(diff.structuralDiff * 100).toFixed(3)}% > 0.15% (>${CHANNEL_DELTA_TOLERANCE} channel levels)`,
+            );
+          }
+          if (diff.downsampledMaxDelta > DOWNSAMPLED_DELTA_THRESHOLD) {
+            reasons.push(
+              `downsampled mean delta ${diff.downsampledMaxDelta.toFixed(2)} > ${DOWNSAMPLED_DELTA_THRESHOLD} (global brightness/shift)`,
+            );
+          }
+          message = reasons.join("; ");
+        }
       }
     }
     const delta = metricsDelta(expected.metrics, metricsFor(rendered));
@@ -505,7 +637,9 @@ export async function runVisualCompare(options: RunCompareOptions = {}): Promise
       id: expected.id,
       status,
       shaMatch,
-      diffRatio,
+      structuralDiff,
+      maxChannelDelta,
+      downsampledMaxDelta,
       thumbShaMatch,
       metricsDelta: Object.keys(delta).length > 0 ? delta : undefined,
       message,
@@ -513,9 +647,10 @@ export async function runVisualCompare(options: RunCompareOptions = {}): Promise
 
     const mark = status === "ok" ? "✓" : "✗";
     const detail: string[] = [];
-    if (!shaMatch) {
-      detail.push(diffRatio === undefined ? "sha only" : `${(diffRatio * 100).toFixed(3)}% diff`);
-    }
+    detail.push(
+      `struct ${((structuralDiff ?? 0) * 100).toFixed(3)}% · maxΔ ${maxChannelDelta ?? 0} · dsΔ ${(downsampledMaxDelta ?? 0).toFixed(2)}`,
+    );
+    if (shaMatch) detail.push("sha identical");
     if (!thumbShaMatch) detail.push("thumb differs");
     if (Object.keys(delta).length > 0) {
       detail.push(
@@ -542,7 +677,7 @@ export async function runVisualCompare(options: RunCompareOptions = {}): Promise
   const ok = failures === 0;
   log(
     `[visual] ${ok ? "PASS" : "FAIL"}: ${results.length - failures}/${results.length} entries match ` +
-      `(renderer ${RENDERER_VERSION}, sha256 primary + 0.15% pixel tolerance, ${(totalMs / 1000).toFixed(1)}s)`,
+      `(renderer ${RENDERER_VERSION}, structural ≤0.15% @Δ>${CHANNEL_DELTA_TOLERANCE} + 64² mean Δ≤${DOWNSAMPLED_DELTA_THRESHOLD}, ${(totalMs / 1000).toFixed(1)}s)`,
   );
   return {
     ok,

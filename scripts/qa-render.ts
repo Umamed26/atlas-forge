@@ -179,7 +179,10 @@ try {
   console.log("\nVisual regression (packages/render/test/baselines):");
   const visual = await runVisualCompare({ missingBaseline: "skip" });
   if (!visual.skipped && !visual.ok) {
-    console.error("visual regression FAILED — refresh baselines with `pnpm qa:visual -- --update` if intentional");
+    console.error(
+      "visual regression FAILED (tolerant structural judge) — " +
+        "refresh baselines with `pnpm qa:visual -- --update` only for intentional visual changes",
+    );
     process.exitCode = 1;
   }
 } catch (error) {

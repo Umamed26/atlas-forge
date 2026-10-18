@@ -5,9 +5,12 @@
  *   tsx scripts/visual-compare.ts --update    # regenerate baselines, then verify
  *   pnpm qa:visual                            # same
  *
- * A regression is any entry whose pixel difference exceeds 0.15% of the image
- * (sha-only changes within tolerance are reported but do not fail), or a
- * missing baseline image / matrix entry.
+ * Pass/fail uses the tolerant judge (scripts/visual-lib.ts):
+ *   - per-pixel: only channel deltas > 16 count, structural diff must be <= 0.15%;
+ *   - structural: 64×64 downsampled max channel mean delta must be <= 3.0.
+ * sha256 is printed as a diagnostic reference only, so CI font/AA differences
+ * between environments do not fail the gate; real look changes still do.
+ * A missing baseline image or matrix entry also fails.
  */
 import { generateBaselines, loadManifest, runVisualCompare } from "./visual-lib";
 
@@ -39,4 +42,4 @@ if (!result.ok) {
   );
   process.exit(1);
 }
-console.log(`[visual] OK — all ${result.entries.length} entries match within 0.15% pixel tolerance.`);
+console.log(`[visual] OK — all ${result.entries.length} entries pass the tolerant structural judge (Δ>16 pixels ≤0.15%, 64² mean Δ≤3.0).`);

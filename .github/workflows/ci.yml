@@ -41,3 +41,6 @@ jobs:
 
       - name: Visual regression vs baselines
         run: pnpm qa:visual
+
+      - name: Algorithm distribution gate
+        run: pnpm qa:algo

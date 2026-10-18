@@ -599,6 +599,8 @@ export function MapStage() {
   const hitBoxes = useWorldStore((state) => state.hitBoxes);
   const draftActive = useWorldStore((state) => state.draftActive);
   const generationKind = useWorldStore((state) => state.generation.kind);
+  const climateOverlay = useWorldStore((state) => state.climateOverlay);
+  const layersForDiagnostics = useWorldStore((state) => state.layers);
 
   // ── draw ────────────────────────────────────────────────────────────
   const draw = useCallback(() => {
@@ -654,6 +656,54 @@ export function MapStage() {
       mapCtx.strokeStyle = "rgba(217, 181, 108, 0.35)";
       mapCtx.lineWidth = 1;
       mapCtx.strokeRect(offsetX + 0.5, offsetY + 0.5, mapPx - 1, mapPx - 1);
+    }
+
+    // Climate diagnostics overlay: semi-transparent temperature heatmap drawn
+    // from already-computed layers (never triggers a generation).
+    if (world.climateOverlay) {
+      const diagLayers = world.layers;
+      if (diagLayers) {
+        const simSize = diagLayers.size;
+        const step = Math.max(1, Math.floor(simSize / 190));
+        const cell = (mapPx / simSize) * step;
+        mapCtx.save();
+        for (let y = 0; y < simSize; y += step) {
+          for (let x = 0; x < simSize; x += step) {
+            const index = y * simSize + x;
+            const ocean = diagLayers.ocean[index] === 1;
+            const temperature = diagLayers.temperature[index];
+            let color: string;
+            if (ocean) {
+              color = "rgba(70, 110, 150, 0.28)";
+            } else {
+              const t = Math.max(0, Math.min(1, temperature));
+              const cold = [74, 127, 181];
+              const mid = [217, 194, 122];
+              const hot = [194, 97, 62];
+              const lerp = (a: number, b: number, k: number) => Math.round(a + (b - a) * k);
+              const rgb =
+                t < 0.5
+                  ? cold.map((channel, i) => lerp(channel, mid[i], t / 0.5))
+                  : mid.map((channel, i) => lerp(channel, hot[i], (t - 0.5) / 0.5));
+              color = `rgba(${rgb[0]}, ${rgb[1]}, ${rgb[2]}, 0.5)`;
+            }
+            mapCtx.fillStyle = color;
+            mapCtx.fillRect(
+              offsetX + (x / simSize) * mapPx,
+              offsetY + (y / simSize) * mapPx,
+              cell + 0.5,
+              cell + 0.5,
+            );
+          }
+        }
+        mapCtx.fillStyle = "rgba(20, 16, 11, 0.82)";
+        mapCtx.fillRect(offsetX + 8, offsetY + mapPx - 30, 168, 22);
+        mapCtx.fillStyle = "#e8dcc0";
+        mapCtx.font = "11px EB Garamond, serif";
+        mapCtx.textBaseline = "middle";
+        mapCtx.fillText("气候诊断：冷 → 热", offsetX + 16, offsetY + mapPx - 19);
+        mapCtx.restore();
+      }
     }
 
     // Overlay layer: editing feedback only.
@@ -987,6 +1037,8 @@ export function MapStage() {
     selectedPlace,
     placeArmed,
     hitBoxes,
+    climateOverlay,
+    layersForDiagnostics,
   ]);
 
   useEffect(() => {

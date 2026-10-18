@@ -23,8 +23,9 @@ import { drawForestGlyphs } from "./forests";
 import { buildTerrainField, getPaperTexture, rasterizeParchment } from "./raster";
 import { resolveTheme, type Quality } from "./style";
 import type { RenderPass } from "./pass";
+import { RENDERER_VERSION } from "./version";
 
-export const RENDERER_VERSION = "1.3.0";
+export { RENDERER_VERSION } from "./version";
 
 export interface RenderWorldInput {
   ctx: Ctx2D;
@@ -267,3 +268,5 @@ export type { RenderFontConfig } from "./fonts";
 export { extractRivers } from "./hydro";
 export { buildCoastData } from "./coast";
 export { defaultDocumentForRenderTests } from "./testing";
+export { renderSvg, renderSvgDetailed, simplifyPolyline } from "./svg";
+export type { RenderSvgInput, RenderedSvg, SvgStats, SvgPhysicalSize, SvgPage } from "./svg";

@@ -219,6 +219,9 @@ async function main() {
       "group-params",
       "group-brushes",
       "group-history",
+      "group-diagnostics",
+      "algorithm-badge",
+      "diag-climate-toggle",
       "preset-open",
       "generated-summary",
       "next-reroll",
@@ -2329,6 +2332,225 @@ async function main() {
     { timeout: 20_000, polling: 150 },
   );
 
+
+  // ── 18b. v0.5 SVG export / diagnostics / algorithm migration ───────
+  log("v0.5 svg / diagnostics / algorithm");
+  const v5Algorithm = await page.evaluate(() => window.__atlasDebug.getAlgorithm());
+  check(
+    "new-world documents default to the classic terrain on the v2 pipeline",
+    v5Algorithm.kind === "classic" && v5Algorithm.version >= 2,
+    JSON.stringify(v5Algorithm),
+  );
+  check(
+    "algorithm badge reports the default classic terrain for new worlds",
+    (await page.locator('[data-testid="algorithm-badge"]').innerText()).includes("经典"),
+    await page.locator('[data-testid="algorithm-badge"]').innerText(),
+  );
+
+  await page.waitForSelector('[data-testid="world-diagnostics"]', { timeout: 20_000 });
+  const diagnostics = await page.evaluate(() => window.__atlasDebug.getDiagnostics());
+  const diagValue = async (testId) =>
+    (await page.locator(`[data-testid="${testId}"]`).innerText()).trim();
+  check(
+    "diagnostics land fraction matches the computed metrics",
+    (await diagValue("diag-land-fraction")).includes(
+      `${(diagnostics.landFraction * 100).toFixed(1)}%`,
+    ),
+    `${await diagValue("diag-land-fraction")} vs ${(diagnostics.landFraction * 100).toFixed(1)}%`,
+  );
+  check(
+    "diagnostics river cells match the computed metrics",
+    (await diagValue("diag-river-cells")) === String(diagnostics.riverCells),
+    `${await diagValue("diag-river-cells")} vs ${diagnostics.riverCells}`,
+  );
+  check(
+    "diagnostics Strahler max is a positive stream order",
+    diagnostics.strahlerMax !== null &&
+      diagnostics.strahlerMax >= 1 &&
+      (await diagValue("diag-strahler")) === String(diagnostics.strahlerMax),
+    `strahler=${diagnostics.strahlerMax}`,
+  );
+  check(
+    "diagnostics hanging-river rate is ~0 for a healthy hydrology pass",
+    diagnostics.hangingRiverRate === null ||
+      diagnostics.hangingRiverRate < 0.02,
+    `hanging=${diagnostics.hangingRiverRate}`,
+  );
+  check(
+    "diagnostics plate count matches the active terrain model",
+    // v0.5 ships the proven fBm terrain by default; the plate model is opt-in.
+    // The panel must show a count for plates and "—" otherwise.
+    (diagnostics.plateCount === null
+      ? (await diagValue("diag-plate-count")).trim().includes("—")
+      : diagnostics.plateCount > 0 &&
+        diagnostics.plateCount < 64 &&
+        (await diagValue("diag-plate-count")) === String(diagnostics.plateCount)),
+    `plates=${diagnostics.plateCount}`,
+  );
+  check(
+    "diagnostics biome bars and stage timings are populated",
+    (await page.locator('[data-testid="diag-biome-bars"] .diag-biome').count()) >= 2 &&
+      /地形[\s\S]*水文[\s\S]*合计/.test(await diagValue("diag-stage-timings")),
+  );
+
+  const diagSeqBefore = (await summary(page)).generation.seq;
+  await page.locator('[data-testid="group-diagnostics"] .panel-group-head').click();
+  await sleep(180);
+  await page.locator('[data-testid="group-diagnostics"] .panel-group-head').click();
+  await sleep(180);
+  check(
+    "opening/closing the diagnostics panel never regenerates",
+    (await summary(page)).generation.seq === diagSeqBefore,
+  );
+  await page.locator('[data-testid="diag-climate-toggle"]').click();
+  await sleep(400);
+  const overlayOn = await summary(page);
+  check(
+    "climate diagnostics overlay toggles without regenerating",
+    overlayOn.generation.seq === diagSeqBefore && overlayOn.climateOverlay === true,
+    `seq ${diagSeqBefore} -> ${overlayOn.generation.seq}`,
+  );
+  await screenshot(page, "29-climate-overlay.png");
+  await page.locator('[data-testid="diag-climate-toggle"]').click();
+  await sleep(220);
+  check("climate overlay can be switched off", (await summary(page)).climateOverlay === false);
+  await screenshot(page, "28-diagnostics.png");
+
+  // SVG vector export
+  await page.locator('[data-testid="export-png"]').click();
+  await page.waitForSelector('[data-testid="export-dialog"]');
+  check(
+    "export dialog exposes the SVG vector option",
+    (await page.locator('[data-testid="export-format-svg"]').count()) === 1,
+  );
+  await page.locator('[data-testid="export-size-2048"]').click();
+  await page.locator('[data-testid="export-format-svg"]').click();
+  await sleep(350);
+  await screenshot(page, "27-svg-option.png");
+  check(
+    "SVG filename preview follows atlas-<world>-<seed>-<preset>-<size>.svg",
+    /^atlas-.+-20261018-(parchment|aged-ink)-2048\.svg$/.test(
+      (await page.locator('[data-testid="export-filename"]').innerText()).trim(),
+    ),
+    await page.locator('[data-testid="export-filename"]').innerText(),
+  );
+  check(
+    "SVG option shows a print-size hint",
+    (await page.locator('[data-testid="export-print-size"]').innerText()).includes("@300dpi"),
+    await page.locator('[data-testid="export-print-size"]').innerText(),
+  );
+  const svgDownload = page.waitForEvent("download", { timeout: 150_000 });
+  await page.locator('[data-testid="export-start"]').click();
+  const svgDownloaded = await svgDownload;
+  const svgPath = join(OUT, "exported-2048.svg");
+  await svgDownloaded.saveAs(svgPath);
+  const svgText = readFileSync(svgPath, "utf8");
+  check(
+    "downloaded SVG filename follows the atlas naming scheme",
+    /^atlas-.+-20261018-(parchment|aged-ink)-2048\.svg$/.test(svgDownloaded.suggestedFilename()),
+    svgDownloaded.suggestedFilename(),
+  );
+  check(
+    "downloaded file is valid SVG vector markup",
+    svgText.trimStart().startsWith("<svg") &&
+      (svgText.includes("<path") || svgText.includes("<text")),
+    `${Buffer.byteLength(svgText)} bytes`,
+  );
+  check(
+    "SVG vector export is non-trivial in size (> 10KB)",
+    Buffer.byteLength(svgText) > 10_000,
+    `${Buffer.byteLength(svgText)} bytes`,
+  );
+  await page.waitForSelector('[data-testid="export-result"]', { timeout: 30_000 });
+  await page.locator('[data-testid="export-dialog-close"]').click();
+  await sleep(150);
+
+  // Old-world migration + upgrade (undoable)
+  const v5ExportDownload = page.waitForEvent("download", { timeout: 20_000 });
+  await page.locator('[data-testid="export-json"]').click();
+  const v5ExportPath = join(OUT, "v05-export.json");
+  await (await v5ExportDownload).saveAs(v5ExportPath);
+  const v5Json = JSON.parse(readFileSync(v5ExportPath, "utf8"));
+  check(
+    "JSON export keeps algorithmVersion and terrainModel",
+    v5Json.algorithmVersion === 2 &&
+      (v5Json.params?.terrainModel === "fbm" || v5Json.params?.terrainModel === "plates"),
+    JSON.stringify({
+      algorithmVersion: v5Json.algorithmVersion,
+      terrainModel: v5Json.params?.terrainModel,
+    }),
+  );
+  delete v5Json.algorithmVersion;
+  if (v5Json.params) delete v5Json.params.terrainModel;
+  const v05LegacyPath = join(OUT, "v04-legacy.json");
+  writeFileSync(v05LegacyPath, JSON.stringify(v5Json));
+  await page.locator('[data-testid="import-json-input"]').setInputFiles(v05LegacyPath);
+  await page.waitForFunction(
+    () => window.__atlasDebug.getAlgorithm().kind === "classic",
+    undefined,
+    { timeout: 20_000, polling: 100 },
+  );
+  await waitIdle(page);
+  check(
+    "legacy JSON without algorithmVersion opens as classic fbm",
+    (await page.evaluate(() => window.__atlasDebug.getAlgorithm().kind)) === "classic" &&
+      (await page.evaluate(
+        () => window.__atlasDebug.getDocument().params.terrainModel,
+      )) === "fbm",
+  );
+  check(
+    "algorithm badge switches to 经典算法",
+    (await page.locator('[data-testid="algorithm-badge"]').innerText()).includes("经典"),
+    await page.locator('[data-testid="algorithm-badge"]').innerText(),
+  );
+  check(
+    "legacy import toast explains the classic migration",
+    (await page.locator('[data-testid="toast"]').last().innerText()).includes("经典算法"),
+  );
+  check(
+    "upgrade button is offered for classic worlds",
+    (await page.locator('[data-testid="upgrade-algorithm"]').count()) === 1,
+  );
+  await screenshot(page, "30-algorithm-badge.png");
+  const undoBeforeUpgrade = (await summary(page)).history.undo;
+  await page.locator('[data-testid="upgrade-algorithm"]').click();
+  await sleep(300);
+  await waitIdle(page);
+  const upgradedState = await summary(page);
+  check(
+    "upgrade switches the badge to 板块算法",
+    (await page.locator('[data-testid="algorithm-badge"]').innerText()).includes("板块"),
+  );
+  check(
+    "upgrade writes algorithmVersion=2 and terrainModel=plates",
+    (await page.evaluate(() => {
+      const doc = window.__atlasDebug.getDocument();
+      return { version: doc.algorithmVersion, terrainModel: doc.params.terrainModel };
+    })).version === 2 &&
+      (await page.evaluate(
+        () => window.__atlasDebug.getDocument().params.terrainModel,
+      )) === "plates",
+  );
+  check(
+    "upgrade adds exactly one undo entry",
+    upgradedState.history.undo === undoBeforeUpgrade + 1,
+    `${undoBeforeUpgrade} -> ${upgradedState.history.undo}`,
+  );
+  await page.keyboard.press("Control+z");
+  await waitIdle(page);
+  check(
+    "undo restores the classic algorithm",
+    (await page.evaluate(() => window.__atlasDebug.getAlgorithm().kind)) === "classic" &&
+      (await page.evaluate(
+        () => window.__atlasDebug.getDocument().params.terrainModel,
+      )) === "fbm",
+  );
+  await page.waitForFunction(
+    () => window.__atlasDebug.getSummary().save.phase === "saved",
+    undefined,
+    { timeout: 20_000, polling: 150 },
+  );
+
   // ── 14. collapsible layout persistence ─────────────────────────────
   log("collapsible layout");
   await page.waitForFunction(
@@ -2491,6 +2713,12 @@ async function main() {
     (await welcomePage
       .locator('[data-testid="param-continentScale"]')
       .getAttribute("max")) === "4",
+  );
+  check(
+    "scenario documents are stamped with the plates algorithm version",
+    (await welcomePage.evaluate(
+      () => window.__atlasDebug.getDocument().algorithmVersion,
+    )) === 2,
   );
   check(
     "welcome completion is persisted (onboarded)",

@@ -7,6 +7,7 @@ export const UI_PREF_KEYS = {
   leftParams: `${PREFIX}left.params.open`,
   leftBrushes: `${PREFIX}left.brushes.open`,
   leftHistory: `${PREFIX}left.history.open`,
+  leftDiagnostics: `${PREFIX}left.diagnostics.open`,
   stylePreset: `${PREFIX}style.preset.open`,
   styleDetail: `${PREFIX}style.detail.open`,
   styleStats: `${PREFIX}style.stats.open`,

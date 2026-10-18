@@ -19,7 +19,14 @@ import {
   type Pipeline,
   type WorldDocument,
 } from "@atlas/core";
-import { RENDERER_VERSION, getRenderFonts, renderWorld, type Ctx2D, type RenderStats } from "@atlas/render";
+import {
+  RENDERER_VERSION,
+  getRenderFonts,
+  renderSvg,
+  renderWorld,
+  type Ctx2D,
+  type RenderStats,
+} from "@atlas/render";
 import { installNodeFonts, type NodeFontInstallResult } from "@atlas/render/node-fonts";
 import { encodeCanvasPng } from "@atlas/render/png";
 
@@ -289,6 +296,11 @@ function capabilities() {
     qualityModes: { preview: "< 2048", export: ">= 2048" },
     presets: ["parchment-classic", "aged-ink"],
     pngEncoders: ["skia", "zlib-up-filter"],
+    vectorExport: {
+      formats: ["svg"],
+      endpoint: "/api/export/svg",
+      physicalSizes: true,
+    },
   };
 }
 
@@ -330,6 +342,90 @@ app.get("/api/health", async () => ({
     totalMb: Math.round(totalmem() / 1048576),
   },
 }));
+
+interface SvgRequestBody {
+  document: WorldDocument;
+  size?: number;
+  physical?: { dpi?: number; widthMm?: number; heightMm?: number };
+}
+
+/**
+ * Vector export: the same generator + the same layout extraction as the PNG
+ * renderer, emitted as a standalone SVG. Layer geometry (coastlines, rivers
+ * with Strahler-derived widths, lakes, labels, frame decorations) is produced
+ * by the shared renderer, so PNG and SVG never drift apart.
+ */
+app.post<{ Body: SvgRequestBody }>("/api/export/svg", async (request, reply) => {
+  const body = request.body;
+  if (!body || typeof body !== "object") {
+    return reply.code(400).send({ error: "invalid request body", code: "INVALID_BODY" });
+  }
+  const documentError = validateDocument(body.document);
+  if (documentError) {
+    return reply.code(400).send({ error: documentError, code: "INVALID_DOCUMENT" });
+  }
+  const document = body.document as WorldDocument;
+
+  let size = DEFAULT_RENDER_SIZE;
+  if (body.size !== undefined) {
+    if (typeof body.size !== "number" || !Number.isFinite(body.size)) {
+      return reply.code(400).send({ error: "size must be a finite number", code: "INVALID_SIZE" });
+    }
+    size = Math.round(body.size);
+  }
+  if (size < MIN_RENDER_SIZE || size > MAX_RENDER_SIZE) {
+    return reply.code(400).send({
+      error: `size must be within ${MIN_RENDER_SIZE}..${MAX_RENDER_SIZE}`,
+      code: "INVALID_SIZE",
+    });
+  }
+  // SVG scales without raster cost; allow the large size without the 8192 memory
+  // preflight because only geometry is retained.
+  const physical =
+    body.physical && typeof body.physical === "object"
+      ? {
+          ...(typeof body.physical.dpi === "number" ? { dpi: body.physical.dpi } : {}),
+          ...(typeof body.physical.widthMm === "number" ? { widthMm: body.physical.widthMm } : {}),
+          ...(typeof body.physical.heightMm === "number" ? { heightMm: body.physical.heightMm } : {}),
+        }
+      : undefined;
+
+  const started = now();
+  try {
+    const simSize = simSizeFor(size);
+    const simStart = now();
+    const layers = pipeline.generate({ document, size: simSize });
+    const simMs = now() - simStart;
+    const renderStart = now();
+    const svg = renderSvg({
+      document,
+      layers,
+      width: size,
+      height: size,
+      quality: qualityFor(size),
+      ...(physical ? { physical } : {}),
+    });
+    const renderMs = now() - renderStart;
+    const bytes = Buffer.byteLength(svg, "utf8");
+    request.log.info({ size, simSize, bytes, totalMs: now() - started }, "svg export completed");
+    return reply
+      .header("Content-Type", "image/svg+xml; charset=utf-8")
+      .header("Content-Disposition", `attachment; filename="atlas-${document.seed}-${size}.svg"`)
+      .header("X-Atlas-Sim-Size", String(simSize))
+      .header("X-Atlas-Sim-Ms", String(Math.round(simMs)))
+      .header("X-Atlas-Render-Ms", String(Math.round(renderMs)))
+      .header("X-Atlas-Total-Ms", String(Math.round(now() - started)))
+      .header("X-Atlas-Svg-Bytes", String(bytes))
+      .header("X-Atlas-Renderer-Version", RENDERER_VERSION)
+      .send(svg);
+  } catch (error) {
+    request.log.error({ err: error }, "svg export failed");
+    return reply.code(500).send({
+      error: error instanceof Error ? error.message : String(error),
+      code: "SVG_EXPORT_FAILED",
+    });
+  }
+});
 
 app.head("/api/render", async (_request, reply) => {
   const caps = capabilities();

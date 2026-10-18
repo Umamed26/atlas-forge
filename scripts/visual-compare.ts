@@ -1,9 +1,14 @@
 /**
- * Compare freshly rendered maps against the committed visual baselines.
+ * Compare freshly rendered fixture plates against the committed visual baselines.
  *
  *   tsx scripts/visual-compare.ts             # fail (exit 1) on regression
  *   tsx scripts/visual-compare.ts --update    # regenerate baselines, then verify
  *   pnpm qa:visual                            # same
+ *
+ * The plates come from the fixed synthetic fixture (NOT the real pipeline), so
+ * this gate only fails when the renderer/theme changes — core algorithm work
+ * does not invalidate it. The manifest records `fixtureVersion` and
+ * `fontScope: latin-only`.
  *
  * Pass/fail uses the tolerant judge (scripts/visual-lib.ts):
  *   - per-pixel: only channel deltas > 16 count, structural diff must be <= 0.15%;

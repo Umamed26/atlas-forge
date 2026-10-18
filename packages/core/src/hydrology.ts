@@ -35,6 +35,17 @@ export interface HydrologyInput {
    * the implementation is exactly the legacy one (bit-for-bit compatible).
    */
   seed?: number;
+  /**
+   * v0.5 semantics: add river topology (Strahler order, normalized width) and
+   * bounded delta branches at river mouths. Absent/false = legacy output.
+   */
+  modern?: boolean;
+  /**
+   * Minimum lake size as a fraction of the grid (default 0.000025 = legacy).
+   * The plate model passes a larger value so erosion pits do not turn the map
+   * into a patchwork of ponds; the legacy value keeps fbm worlds bit-identical.
+   */
+  lakeMinFraction?: number;
 }
 
 export interface HydrologyResult {
@@ -49,6 +60,10 @@ export interface HydrologyResult {
   landCells: number;
   riverThreshold: number;
   lakeCount: number;
+  /** Strahler stream order (0 = not a river). Modern semantics only. */
+  riverOrder?: Uint8Array;
+  /** Normalized river width 0..1 (renderer hint). Modern semantics only. */
+  riverWidth?: Float32Array;
 }
 
 const NEIGHBOR_DX = [-1, 1, 0, 0, -1, 1, -1, 1] as const;
@@ -252,7 +267,12 @@ export function computeHydrology(input: HydrologyInput): HydrologyResult {
 
   // ── Lakes: connected fill-depressions with a real water surface ────────
   const lake = new Uint8Array(cells);
-  const lakeMinCells = Math.max(4, Math.round(cells * 0.000025));
+  const lakeMinCells = Math.max(4, Math.round(cells * (input.lakeMinFraction ?? 0.000025)));
+  // A single inland basin larger than this is a terrain artefact, not a lake:
+  // keep it as low land instead of flooding a sixth of the continent. Only the
+  // modern policy opts in — legacy fbm worlds must stay bit-identical.
+  const enforceLakeMax = input.lakeMinFraction !== undefined;
+  const lakeMaxCells = Math.max(lakeMinCells, Math.round(cells * 0.006));
   const depthThreshold = 0.0015;
   const raised = new Uint8Array(cells);
   for (let i = 0; i < cells; i += 1) {
@@ -281,17 +301,31 @@ export function computeHydrology(input: HydrologyInput): HydrologyResult {
       }
     }
     // `scratch[0..queueTail)` are exactly this component's members.
-    if (queueTail >= lakeMinCells) {
+    if (queueTail >= lakeMinCells && (!enforceLakeMax || queueTail <= lakeMaxCells)) {
       lakeCount += 1;
       for (let m = 0; m < queueTail; m += 1) lake[scratch[m]] = 1;
     } else {
-      for (let m = 0; m < queueTail; m += 1) lake[scratch[m]] = 0;
+      // Mark rejected depressions as *visited* (3), never reset to 0: a reset
+      // lets the outer loop start a new flood from the same cells again, which
+      // is quadratic when erosion leaves thousands of small pits (observed as
+      // 3.4s hydrology on some seeds). The classification result is unchanged.
+      for (let m = 0; m < queueTail; m += 1) lake[scratch[m]] = 3;
     }
   }
-  // Invariant guardrail: any non-ocean cell below sea level must be water,
-  // even if its depression is too small to be a named lake.
+  // Rejected depressions were tagged 3 ("visited, not water"); consumers treat
+  // the mask as 0/1, so clear them before classification output.
   for (let i = 0; i < cells; i += 1) {
-    if (!ocean[i] && height[i] < seaLevel) lake[i] = 1;
+    if (lake[i] === 3) lake[i] = 0;
+  }
+
+  // Invariant guardrail (legacy policy): any non-ocean cell below sea level must
+  // be water, even if its depression is too small to be a named lake. The plate
+  // model clamps its land before this stage and passes a stricter lake policy,
+  // so it is skipped there.
+  if (input.lakeMinFraction === undefined) {
+    for (let i = 0; i < cells; i += 1) {
+      if (!ocean[i] && height[i] < seaLevel) lake[i] = 1;
+    }
   }
 
   // ── D8 routing on the filled surface ───────────────────────────────────
@@ -430,6 +464,102 @@ export function computeHydrology(input: HydrologyInput): HydrologyResult {
     if (flow[i] >= threshold) river[i] = 1;
     else if (channel !== undefined && channel[i]) river[i] = 1;
   }
+  // ── v0.5 river topology: deltas, Strahler order, normalized width ──────
+  let riverOrder: Uint8Array | undefined;
+  let riverWidth: Float32Array | undefined;
+  if (input.modern) {
+    // Bounded delta branches at major river mouths (deterministic per cell).
+    const deltaSalt = input.seed === undefined ? 0 : Math.imul(input.seed, 0x9e3779b1);
+    for (let i = 0; i < cells; i += 1) {
+      if (river[i] === 0 || ocean[i] === 1 || lake[i] === 1) continue;
+      if (flow[i] < threshold * 3) continue;
+      const x = i % size;
+      const y = (i / size) | 0;
+      let touchesOcean = false;
+      for (let k = 0; k < 8; k += 1) {
+        const nx = x + NEIGHBOR_DX[k];
+        const ny = y + NEIGHBOR_DY[k];
+        if (nx < 0 || ny < 0 || nx >= size || ny >= size) continue;
+        if (ocean[ny * size + nx] === 1) {
+          touchesOcean = true;
+          break;
+        }
+      }
+      if (!touchesOcean) continue;
+      const branches = hash2(x, y, deltaSalt ^ 0x0d3a) & 1;
+      let added = 0;
+      for (let k = 0; k < 8 && added <= branches; k += 1) {
+        const nx = x + NEIGHBOR_DX[k];
+        const ny = y + NEIGHBOR_DY[k];
+        if (nx < 0 || ny < 0 || nx >= size || ny >= size) continue;
+        const nIndex = ny * size + nx;
+        if (river[nIndex] === 1 || ocean[nIndex] === 1 || lake[nIndex] === 1) continue;
+        // Only branch into a cell that itself touches the sea (a delta lobe).
+        let nTouchesOcean = false;
+        const nnx = nx;
+        const nny = ny;
+        for (let kk = 0; kk < 8; kk += 1) {
+          const mx = nnx + NEIGHBOR_DX[kk];
+          const my = nny + NEIGHBOR_DY[kk];
+          if (mx < 0 || my < 0 || mx >= size || my >= size) continue;
+          if (ocean[my * size + mx] === 1) {
+            nTouchesOcean = true;
+            break;
+          }
+        }
+        if (!nTouchesOcean) continue;
+        river[nIndex] = 1;
+        added += 1;
+      }
+    }
+
+    // Strahler order: process the flow graph in topological order (scratch
+    // currently holds the Kahn processing order, sources first).
+    riverOrder = new Uint8Array(cells);
+    const upstreamMax = new Uint8Array(cells);
+    const upstreamMaxCount = new Uint8Array(cells);
+    const topoCount = queueTail;
+    for (let t = 0; t < topoCount; t += 1) {
+      const cell = scratch[t];
+      if (river[cell] === 0) continue;
+      const best = upstreamMax[cell];
+      if (best === 0) {
+        riverOrder[cell] = 1;
+      } else {
+        riverOrder[cell] = upstreamMaxCount[cell] >= 2 ? best + 1 : best;
+      }
+      const order = riverOrder[cell];
+      const d = downstream[cell];
+      if (d >= 0 && river[d] === 1) {
+        if (order > upstreamMax[d]) {
+          upstreamMax[d] = order;
+          upstreamMaxCount[d] = 1;
+        } else if (order === upstreamMax[d]) {
+          upstreamMaxCount[d] = Math.min(255, upstreamMaxCount[d] + 1);
+        }
+      }
+    }
+
+    // Normalized width: sqrt(flow) scaled, with a Strahler-order floor so
+    // tributaries stay visible next to the main stem.
+    let maxFlow = 0;
+    let maxOrder = 0;
+    for (let i = 0; i < cells; i += 1) {
+      if (river[i] === 0) continue;
+      if (flow[i] > maxFlow) maxFlow = flow[i];
+      if (riverOrder[i] > maxOrder) maxOrder = riverOrder[i];
+    }
+    const invSqrtMax = maxFlow > 0 ? 1 / Math.sqrt(maxFlow) : 0;
+    const invMaxOrder = maxOrder > 0 ? 1 / maxOrder : 0;
+    riverWidth = new Float32Array(cells);
+    for (let i = 0; i < cells; i += 1) {
+      if (river[i] === 0) continue;
+      const flowRatio = Math.sqrt(flow[i]) * invSqrtMax;
+      const orderRatio = riverOrder[i] * invMaxOrder;
+      riverWidth[i] = Math.min(1, 0.1 + 0.65 * flowRatio + 0.3 * orderRatio);
+    }
+  }
+
   // Forced channels that happen to sit in a lake still count as river only if
   // they are dry land; lakes keep their own layer.
   for (let i = 0; i < cells; i += 1) {
@@ -447,5 +577,74 @@ export function computeHydrology(input: HydrologyInput): HydrologyResult {
     landCells,
     riverThreshold: threshold,
     lakeCount,
+    ...(riverOrder === undefined ? {} : { riverOrder }),
+    ...(riverWidth === undefined ? {} : { riverWidth }),
   };
+}
+
+// ── Drainage helper (used by terrain stream-power erosion) ────────────────
+
+export interface Drainage {
+  filled: Float32Array;
+  downstream: Int32Array;
+  /** Upstream cell count including the cell itself. */
+  accumulation: Float32Array;
+  /** Topological order (sources first). */
+  order: Int32Array;
+}
+
+/**
+ * Coarse depression fill + D8 routing + flow accumulation, for erosion.
+ * Treats the map border as the outlet (all border cells are sinks) and does not
+ * know about sea level; the official hydrology stage recomputes everything.
+ */
+export function computeDrainage(size: number, height: Float32Array): Drainage {
+  const cells = size * size;
+  const filled = new Float32Array(cells);
+  filled.fill(NaN);
+  priorityFlood(size, height, filled);
+  const downstream = new Int32Array(cells);
+  downstream.fill(-1);
+  for (let y = 1; y < size - 1; y += 1) {
+    const row = y * size;
+    for (let x = 1; x < size - 1; x += 1) {
+      const cell = row + x;
+      const h = filled[cell];
+      let best = -1;
+      let bestSlope = 0;
+      for (let k = 0; k < 8; k += 1) {
+        const nIndex = (y + NEIGHBOR_DY[k]) * size + (x + NEIGHBOR_DX[k]);
+        const drop = h - filled[nIndex];
+        if (drop <= 0) continue;
+        const slope = drop / (k < 4 ? 1 : Math.SQRT2);
+        if (slope > bestSlope) {
+          bestSlope = slope;
+          best = nIndex;
+        }
+      }
+      downstream[cell] = best;
+    }
+  }
+  const accumulation = new Float32Array(cells);
+  accumulation.fill(1);
+  const indegree = new Int32Array(cells);
+  for (let i = 0; i < cells; i += 1) {
+    const d = downstream[i];
+    if (d >= 0) indegree[d] += 1;
+  }
+  const order = new Int32Array(cells);
+  let head = 0;
+  let tail = 0;
+  for (let i = 0; i < cells; i += 1) {
+    if (indegree[i] === 0) order[tail++] = i;
+  }
+  while (head < tail) {
+    const cell = order[head++];
+    const d = downstream[cell];
+    if (d < 0) continue;
+    accumulation[d] += accumulation[cell];
+    indegree[d] -= 1;
+    if (indegree[d] === 0) order[tail++] = d;
+  }
+  return { filled, downstream, accumulation, order };
 }

@@ -33,6 +33,7 @@ import {
   type PipelineStage,
   type PipelineStats,
   type ProgressUpdate,
+  type TerrainModel,
   type WorldDocument,
   type WorldLayers,
   type WorldOverrides,
@@ -112,6 +113,7 @@ function climateSignature(params: WorldParams): string {
 interface TerrainCacheValue {
   height: Float32Array;
   channel: Uint8Array;
+  plates?: { id: Uint8Array; count: number };
 }
 
 interface HydrologyCacheValue {
@@ -124,6 +126,8 @@ interface HydrologyCacheValue {
   landCells: number;
   riverThreshold: number;
   lakeCount: number;
+  riverOrder?: Uint8Array;
+  riverWidth?: Float32Array;
 }
 
 interface ClimateCacheValue {
@@ -189,10 +193,25 @@ export function createPipeline(): Pipeline {
       const climateSeed = finiteSeed(rawStageSeeds.climate);
       const humanSeed = finiteSeed(rawStageSeeds.human) ?? document.seed;
 
+      // ── Algorithm migration (v0.5) ─────────────────────────────────────
+      // Absent / < 2 algorithmVersion documents are legacy worlds: they keep
+      // the exact pre-v0.5 fBm terrain and legacy stage semantics.
+      const legacyDocument =
+        !(typeof document.algorithmVersion === "number" && document.algorithmVersion >= 2);
+      const requestedModel: TerrainModel =
+        params.terrainModel ?? (legacyDocument ? "fbm" : "plates");
+      const terrainModel: TerrainModel = legacyDocument ? "fbm" : requestedModel;
+      // Modern (v0.5) climate/ecology/river semantics are keyed off the world's
+      // algorithm version, not off the terrain model: new worlds get causal
+      // climate + Strahler river topology on either terrain model, while legacy
+      // documents keep the bit-identical v0.4 pipeline.
+      const modern = !legacyDocument;
+      const modernTerrain = !legacyDocument;
+
       const elevationKey = elevationStampKey(overrides.elevation);
       const riverKey = riverForceKey(overrides.riverForce);
       const biomeKey = biomeStampKey(overrides.biome);
-      const terrainKey = `t|${size}|${terrainSeed}|${terrainSignature(params)}|${elevationKey}|${riverKey}`;
+      const terrainKey = `t|${size}|${terrainSeed}|${terrainSignature(params)}|${elevationKey}|${riverKey}|m:${terrainModel}|p:${params.tectonicPlates ?? "auto"}`;
       const hydrologyKey = `${terrainKey}§h|${hydrologySignature(params)}|hs:${hydrologySeed ?? "none"}`;
       const climateKey = `${terrainKey}§c|${climateSignature(params)}|cs:${climateSeed ?? "none"}`;
       const biomeFingerprint = `${climateKey}§b|${biomeKey}`;
@@ -206,7 +225,11 @@ export function createPipeline(): Pipeline {
       emitProgress(options.onProgress, "terrain", 0.02, startedAt);
       let terrain = caching ? terrainCache.get(terrainKey) : null;
       let terrainHit = terrain !== null;
-      if (terrain && !arraysAlive(cells, [terrain.height, terrain.channel])) {
+      if (
+        terrain &&
+        (!arraysAlive(cells, [terrain.height, terrain.channel]) ||
+          (terrain.plates !== undefined && terrain.plates.id.length !== cells))
+      ) {
         terrainCache.clear();
         terrain = null;
         terrainHit = false;
@@ -216,7 +239,10 @@ export function createPipeline(): Pipeline {
         terrainHit = false;
         if (caching) terrainCache.clear();
         const t0 = nowMs();
-        terrain = generateTerrain(size, terrainSeed, params, overrides);
+        terrain = generateTerrain(size, terrainSeed, params, overrides, {
+          model: terrainModel,
+          modern: modernTerrain,
+        });
         terrainMs = nowMs() - t0;
         if (caching) terrainCache.set(terrainKey, terrain);
       }
@@ -229,13 +255,15 @@ export function createPipeline(): Pipeline {
       let hydrologyHit = hydrology !== null;
       if (
         hydrology &&
-        !arraysAlive(cells, [
+        (!arraysAlive(cells, [
           hydrology.filled,
           hydrology.ocean,
           hydrology.lake,
           hydrology.river,
           hydrology.flow,
-        ])
+        ]) ||
+          (hydrology.riverOrder !== undefined && hydrology.riverOrder.length !== cells) ||
+          (hydrology.riverWidth !== undefined && hydrology.riverWidth.length !== cells))
       ) {
         hydrologyCache.clear();
         hydrology = null;
@@ -252,6 +280,10 @@ export function createPipeline(): Pipeline {
           channel,
           seaLevel: params.seaLevel,
           riverDensity: params.riverDensity,
+          modern,
+          // The plate model gets a stricter lake policy: erosion pits would
+          // otherwise flood 6% of the map. Legacy fbm worlds keep the old value.
+          ...(modern ? { lakeMinFraction: 0.0006 } : {}),
           ...(hydrologySeed === undefined ? {} : { seed: hydrologySeed }),
         });
         hydrologyMs = nowMs() - t0;
@@ -265,6 +297,8 @@ export function createPipeline(): Pipeline {
           landCells: result.landCells,
           riverThreshold: result.riverThreshold,
           lakeCount: result.lakeCount,
+          ...(result.riverOrder === undefined ? {} : { riverOrder: result.riverOrder }),
+          ...(result.riverWidth === undefined ? {} : { riverWidth: result.riverWidth }),
         };
         if (caching) hydrologyCache.set(hydrologyKey, hydrology);
       }
@@ -293,6 +327,7 @@ export function createPipeline(): Pipeline {
           windBands: params.windBands,
           moistureBias: params.moistureBias,
           temperatureOffset: params.temperatureOffset,
+          modern,
           ...(climateSeed === undefined ? {} : { seed: climateSeed }),
         });
         climateMs = nowMs() - t0;
@@ -323,6 +358,7 @@ export function createPipeline(): Pipeline {
             moisture: climate.moisture,
             seaLevel: params.seaLevel,
             biomeStamps: overrides.biome,
+            modern,
           }),
         };
         biomeMs = nowMs() - t0;
@@ -376,6 +412,14 @@ export function createPipeline(): Pipeline {
       const outBiome = new Uint8Array(biomeResult.biome);
       const settlements = human.settlements.map((settlement) => ({ ...settlement }));
       const autoLabels = human.autoLabels.map((label) => ({ ...label }));
+      const outRiverOrder =
+        hydrology.riverOrder === undefined ? undefined : new Uint8Array(hydrology.riverOrder);
+      const outRiverWidth =
+        hydrology.riverWidth === undefined ? undefined : new Float32Array(hydrology.riverWidth);
+      const outPlates =
+        terrain.plates === undefined
+          ? undefined
+          : { id: new Uint8Array(terrain.plates.id), count: terrain.plates.count };
       const hiddenSettlements = human.hidden.settlements.map((settlement) => ({ ...settlement }));
       const hiddenLabels = human.hidden.labels.map((label) => ({ ...label }));
 
@@ -407,6 +451,9 @@ export function createPipeline(): Pipeline {
         settlements,
         autoLabels,
         hidden: { settlements: hiddenSettlements, labels: hiddenLabels },
+        ...(outRiverOrder === undefined ? {} : { riverOrder: outRiverOrder }),
+        ...(outRiverWidth === undefined ? {} : { riverWidth: outRiverWidth }),
+        ...(outPlates === undefined ? {} : { plates: outPlates }),
         stats,
       };
     },

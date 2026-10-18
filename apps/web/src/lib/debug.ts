@@ -9,6 +9,8 @@ import { BASE_RENDER_SIZE } from "./constants";
 import { countOverrides } from "./documentIO";
 import { collectPlaces, generatePlaceName, uniquePlaceName, type PlaceEntry } from "./places";
 import { assessReadabilityLocal } from "./readability";
+import { computeDiagnostics } from "./diagnostics";
+import { readAlgorithm } from "./worldAlgorithm";
 import { LOCK_KEYS, seedLabel } from "./stageSeeds";
 import { scenarioById } from "./scenarios";
 import {
@@ -75,6 +77,8 @@ export interface AtlasDebugSummary {
   autosaveRecovery: { pending: boolean; hasBackup: boolean } | null;
   scenarioId: string;
   scenarioName: string;
+  algorithm: { kind: string; label: string; version: number };
+  climateOverlay: boolean;
   locks: Record<string, boolean>;
   generatedSummary: string;
   generationKind: string;
@@ -125,6 +129,8 @@ export interface AtlasDebugApi {
     deduped: string;
     randomSample: string;
   };
+  getDiagnostics: () => ReturnType<typeof computeDiagnostics>;
+  getAlgorithm: () => { kind: string; label: string; version: number };
   getGenerationHistory: () => {
     id: string;
     seed: number;
@@ -283,6 +289,11 @@ function buildSummary(): AtlasDebugSummary {
       : null,
     scenarioId: state.scenarioId,
     scenarioName: scenarioById(state.scenarioId).name,
+    algorithm: (() => {
+      const algorithm = readAlgorithm(state.document);
+      return { kind: algorithm.kind, label: algorithm.label, version: algorithm.version };
+    })(),
+    climateOverlay: state.climateOverlay,
     locks: Object.fromEntries(LOCK_KEYS.map((key) => [key, state.locks[key]])),
     generatedSummary: `${scenarioById(state.scenarioId).name} · ${seedLabel(state.document.seed)}`,
     generationKind: state.generation.kind,
@@ -371,6 +382,14 @@ export function installDebugApi(): void {
         deduped: uniquePlaceName("新港", ["新港", "新港-2"]),
         randomSample: generatePlaceName("settlement", "city"),
       };
+    },
+    getDiagnostics: () => {
+      const state = useWorldStore.getState();
+      return computeDiagnostics(state.document, state.layers);
+    },
+    getAlgorithm: () => {
+      const algorithm = readAlgorithm(useWorldStore.getState().document);
+      return { kind: algorithm.kind, label: algorithm.label, version: algorithm.version };
     },
     getGenerationHistory: () =>
       useWorldStore.getState().generationHistory.map((entry) => ({

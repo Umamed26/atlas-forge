@@ -15,6 +15,7 @@ export const DEFAULT_PARAMS: WorldParams = {
   moistureBias: 0,
   temperatureOffset: 0,
   namingLanguage: "auto",
+  terrainModel: "fbm",
 };
 
 export const DEFAULT_STYLE: RenderStyle = {
@@ -35,6 +36,7 @@ export const DEFAULT_STYLE: RenderStyle = {
 export interface CreateDocumentOptions {
   name?: string;
   seed?: number;
+  algorithmVersion?: number;
   params?: Partial<WorldParams>;
   style?: Partial<RenderStyle>;
   overrides?: WorldDocument["overrides"];
@@ -51,6 +53,7 @@ export function createDefaultDocument(options: CreateDocumentOptions = {}): Worl
   idCounter += 1;
   return {
     version: 1,
+    algorithmVersion: options.algorithmVersion ?? 2,
     id: `world-${Date.now().toString(36)}-${idCounter}`,
     name,
     seed,

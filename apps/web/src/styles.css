@@ -2996,3 +2996,216 @@ textarea {
     font-size: 10.5px;
   }
 }
+
+/* ---------- v0.5 diagnostics / algorithm ---------- */
+
+.algo-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 8px;
+  border-radius: 999px;
+  font-size: 10.5px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  white-space: nowrap;
+}
+
+.algo-chip--plates {
+  color: var(--accent);
+  border-color: rgba(220, 181, 109, 0.55);
+  background: var(--accent-soft);
+}
+
+.algo-chip--classic {
+  color: var(--ink-dim);
+  border-color: var(--border-strong);
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.world-diagnostics {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  padding: 2px 2px 10px;
+}
+
+.diag-group {
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: rgba(0, 0, 0, 0.14);
+  padding: 7px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.diag-group-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 11px;
+  color: var(--ink);
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.diag-kicker {
+  font-size: 9.5px;
+  color: var(--dim);
+  font-weight: 400;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.diag-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 10.5px;
+  line-height: 1.55;
+}
+
+.diag-label {
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.diag-value {
+  color: var(--ink-dim);
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.diag-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 2px 10px;
+}
+
+.diag-biomes {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.diag-biome {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 10px;
+}
+
+.diag-biome-name {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  width: 84px;
+  color: var(--ink-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.swatch-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  display: inline-block;
+  flex-shrink: 0;
+  border: 1px solid rgba(0, 0, 0, 0.35);
+}
+
+.diag-biome-track {
+  flex: 1;
+  height: 5px;
+  border-radius: 3px;
+  background: rgba(58, 49, 35, 0.7);
+  overflow: hidden;
+}
+
+.diag-biome-fill {
+  display: block;
+  height: 100%;
+  border-radius: 3px;
+}
+
+.diag-biome-share {
+  width: 34px;
+  text-align: right;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.diag-stages {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.diag-stage {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
+  padding: 2px 6px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  font-size: 9.5px;
+  color: var(--muted);
+}
+
+.diag-stage strong {
+  color: var(--ink);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.diag-stage--total {
+  border-color: rgba(220, 181, 109, 0.35);
+  color: var(--accent);
+}
+
+/* SVG export option */
+
+.export-format-tabs {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+
+.export-format-tab {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  align-items: flex-start;
+  padding: 8px 10px;
+  border-radius: 9px;
+  border: 1px solid var(--border);
+  background: #17120c;
+  color: var(--ink-dim);
+  cursor: pointer;
+  text-align: left;
+}
+
+.export-format-tab.is-selected {
+  border-color: var(--accent);
+  background: rgba(220, 181, 109, 0.08);
+  color: var(--ink);
+}
+
+.export-format-tab:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.export-format-tab-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ink-strong);
+}
+
+.export-format-tab-note {
+  font-size: 9.5px;
+  color: var(--muted);
+}

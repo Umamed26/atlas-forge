@@ -58,6 +58,13 @@ export interface StageSeeds {
   human?: number;
 }
 
+/**
+ * Terrain generation model.
+ * - "plates": Voronoi plate tectonics + stream-power erosion (v0.5 default)
+ * - "fbm": pre-v0.5 fBm + ridge-mask terrain (kept for legacy worlds)
+ */
+export type TerrainModel = "plates" | "fbm";
+
 export interface WorldParams {
   /** Preview simulation grid edge length (power of two). */
   gridSize: number;
@@ -98,6 +105,17 @@ export interface WorldParams {
    * Absent = document.seed for every stage (identical to pre-v0.4 behaviour).
    */
   stageSeeds?: StageSeeds;
+  /**
+   * Terrain generation model. Absent on legacy documents; new worlds use
+   * "plates" (the default). "fbm" preserves the pre-v0.5 look for old worlds.
+   */
+  terrainModel?: TerrainModel;
+  /**
+   * Number of Voronoi tectonic plates (clamped 12..32). Absent = seed-derived
+   * (26 ± 4 for the v0.5 default), which keeps landmasses organic rather than
+   * blocky.
+   */
+  tectonicPlates?: number;
 }
 
 export interface RenderStyle {
@@ -188,6 +206,12 @@ export interface MapLabel {
 // ── Persisted document ────────────────────────────────────────────────────
 export interface WorldDocument {
   version: 1;
+  /**
+   * Generation algorithm version (additive). Absent or < 2 = legacy world,
+   * automatically rendered with the pre-v0.5 fBm terrain so imports keep their
+   * exact look. New documents are written with version 2.
+   */
+  algorithmVersion?: number;
   id: string;
   name: string;
   seed: number;
@@ -243,6 +267,12 @@ export interface WorldLayers {
    * restorable" list; removing the id from `hiddenIds` restores the entry.
    */
   hidden?: { settlements: Settlement[]; labels: MapLabel[] };
+  /** Strahler stream order per cell (0 = not a river). */
+  riverOrder?: Uint8Array;
+  /** Normalized river width per cell (0 = not a river), renderer hint. */
+  riverWidth?: Float32Array;
+  /** Tectonic plate ownership (debug / optional rendering). */
+  plates?: { id: Uint8Array; count: number };
   stats: PipelineStats;
 }
 

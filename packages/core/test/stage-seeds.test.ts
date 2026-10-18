@@ -93,16 +93,26 @@ const V030_BASELINE: Record<string, ReturnType<typeof snapshot>> = {
   },
 };
 
+/** v0.3 documents predate algorithmVersion/terrainModel -> legacy fBm world. */
+function legacyDocument(document: WorldDocument): WorldDocument {
+  const copy: WorldDocument = { ...document, params: { ...document.params } };
+  delete copy.algorithmVersion;
+  delete copy.params.terrainModel;
+  return copy;
+}
+
 function baselineDocuments(): { name: string; doc: WorldDocument; size: number }[] {
   return [
     {
       name: "A",
-      doc: createDefaultDocument({ name: "Aetheris", seed: 20261018, params: { gridSize: 256 } }),
+      doc: legacyDocument(
+        createDefaultDocument({ name: "Aetheris", seed: 20261018, params: { gridSize: 256 } }),
+      ),
       size: 256,
     },
     {
       name: "B",
-      doc: createDefaultDocument({
+      doc: legacyDocument(createDefaultDocument({
         name: "Legacy Overrides",
         seed: 101,
         params: { gridSize: 192, namingLanguage: "latin", seaLevel: 0.3, erosionIterations: 0 },
@@ -118,15 +128,17 @@ function baselineDocuments(): { name: string; doc: WorldDocument; size: number }
         labels: [
           { id: "user-l-1", text: "测试地名", kind: "custom", x: 0.6, y: 0.4, pinned: true },
         ],
-      }),
+      })),
       size: 192,
     },
     {
       name: "C",
-      doc: createDefaultDocument({
-        seed: 777,
-        params: { gridSize: 384, seaLevel: 0.6, continentScale: 1.7 },
-      }),
+      doc: legacyDocument(
+        createDefaultDocument({
+          seed: 777,
+          params: { gridSize: 384, seaLevel: 0.6, continentScale: 1.7 },
+        }),
+      ),
       size: 384,
     },
   ];

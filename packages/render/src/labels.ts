@@ -74,7 +74,7 @@ interface PrecomputedWidths {
   total: number;
 }
 
-interface LaidText {
+export interface LaidText {
   type: "text";
   entity: "label" | "settlement";
   id: string;
@@ -99,7 +99,7 @@ interface LaidText {
   pinned: boolean;
 }
 
-interface LaidMarker {
+export interface LaidMarker {
   type: "marker";
   id: string;
   drawable: Drawable;

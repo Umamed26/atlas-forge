@@ -91,7 +91,10 @@ export const ELEVATION_MODES: { id: ElevationMode; label: string; title: string 
 
 // ── Parameter metadata ────────────────────────────────────────────────────
 export interface ParamSliderDef {
-  key: Exclude<keyof WorldParams, "gridSize" | "windBands" | "namingLanguage" | "stageSeeds">;
+  key: Exclude<
+    keyof WorldParams,
+    "gridSize" | "windBands" | "namingLanguage" | "stageSeeds" | "terrainModel" | "tectonicPlates"
+  >;
   label: string;
   min: number;
   max: number;

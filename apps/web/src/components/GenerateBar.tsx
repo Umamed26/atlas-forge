@@ -2,6 +2,7 @@
 import { LOCK_KEYS, LOCK_META, seedLabel } from "../lib/stageSeeds";
 import { SCENARIOS } from "../lib/scenarios";
 import { scenarioById } from "../lib/scenarios";
+import { readAlgorithm } from "../lib/worldAlgorithm";
 import { useWorldStore } from "../state/worldStore";
 
 export interface GenerateBarProps {
@@ -27,6 +28,8 @@ export function GenerateBar({ onOpenScenario, onOpenExport }: GenerateBarProps) 
   const locks = useWorldStore((state) => state.locks);
   const ready = useWorldStore((state) => state.layers !== null);
   const scenario = scenarioById(scenarioId);
+  const documentForAlgorithm = useWorldStore((state) => state.document);
+  const algorithm = readAlgorithm(documentForAlgorithm);
   const lockedCount = LOCK_KEYS.filter((key) => locks[key]).length;
 
   return (
@@ -40,6 +43,25 @@ export function GenerateBar({ onOpenScenario, onOpenExport }: GenerateBarProps) 
       >
         ✦ 场景
       </button>
+
+      <span
+        className={`algo-chip algo-chip--${algorithm.kind}`}
+        data-testid="algorithm-badge"
+        title={algorithm.hint}
+      >
+        {algorithm.label}
+      </span>
+      {algorithm.kind === "classic" ? (
+        <button
+          type="button"
+          className="btn btn--small btn--accent"
+          data-testid="upgrade-algorithm"
+          title="试用板块构造地形（会改变地貌，可撤销）"
+          onClick={() => useWorldStore.getState().upgradeAlgorithm()}
+        >
+          试用板块地形
+        </button>
+      ) : null}
 
       {ready ? (
         <span className="generated-summary" data-testid="generated-summary">

@@ -14,8 +14,14 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { createCanvas, GlobalFonts } from "@napi-rs/canvas";
-import { createDefaultDocument, createPipeline, type WorldDocument, type WorldLayers } from "@atlas/core";
-import { RENDERER_VERSION, renderWorld, type Ctx2D, type RenderStats } from "@atlas/render";
+import {
+  createDefaultDocument,
+  createPipeline,
+  getScenarioPreset,
+  type WorldDocument,
+  type WorldLayers,
+} from "@atlas/core";
+import { RENDERER_VERSION, renderSvg, renderWorld, type Ctx2D, type RenderStats } from "@atlas/render";
 import { installNodeFonts } from "@atlas/render/node-fonts";
 import { encodeCanvasPng } from "@atlas/render/png";
 
@@ -189,4 +195,22 @@ try {
   console.warn(
     `visual regression skipped: ${error instanceof Error ? error.message : String(error)}`,
   );
+}
+
+// ── Vector export smoke test (v0.5) ───────────────────────────────────────
+{
+  const preset = getScenarioPreset("classic")!;
+  const document = createDefaultDocument({
+    name: "QA Vector World",
+    seed: 101,
+    params: { ...preset.params, namingLanguage: "latin", gridSize: 1024 },
+    style: { ...preset.style, title: "QA Vector World" },
+  });
+  const layers = pipeline.generate({ document, size: 1024 });
+  const startedAt = performance.now();
+  const svg = renderSvg({ document, layers, width: 1024, height: 1024, quality: "preview" });
+  const elapsed = performance.now() - startedAt;
+  const file = join(OUT_DIR, "qa-export.svg");
+  writeFileSync(file, svg);
+  console.log(`  svg            ${file}  (${(Buffer.byteLength(svg) / 1024).toFixed(0)} KB, ${elapsed.toFixed(0)}ms)`);
 }

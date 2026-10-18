@@ -21,6 +21,7 @@ import { formatMs, formatPercent } from "../lib/utils";
 import { useWorldStore } from "../state/worldStore";
 import { UI_PREF_KEYS } from "../lib/uiPrefs";
 import { GenerationHistoryPanel } from "./GenerationHistoryPanel";
+import { WorldDiagnostics } from "./WorldDiagnostics";
 import { PlacesPanel } from "./PlacesPanel";
 import {
   CollapsibleGroup,
@@ -380,6 +381,15 @@ export function ParamPanel() {
           testId="group-history"
         >
           <GenerationHistoryPanel />
+        </CollapsibleGroup>
+
+        <CollapsibleGroup
+          title="世界诊断"
+          icon="◎"
+          storageKey={UI_PREF_KEYS.leftDiagnostics}
+          testId="group-diagnostics"
+        >
+          <WorldDiagnostics />
         </CollapsibleGroup>
       </div>
       <ScrollHint visible={scroll.scrollable && !scroll.atBottom} testId="params-scroll-hint">

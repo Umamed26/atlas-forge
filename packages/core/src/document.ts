@@ -162,7 +162,7 @@ interface NumberRange {
 }
 
 const PARAM_RANGES: Record<
-  Exclude<keyof WorldParams, "gridSize" | "windBands" | "namingLanguage" | "stageSeeds">,
+  Exclude<keyof WorldParams, "gridSize" | "windBands" | "namingLanguage" | "stageSeeds" | "terrainModel" | "tectonicPlates">,
   NumberRange
 > = {
   seaLevel: { min: 0.2, max: 0.7, label: "海平面" },
@@ -259,6 +259,24 @@ function normalizeParams(raw: unknown, issues: IssueCollector): WorldParams {
 
   const stageSeeds = normalizeStageSeeds(source.stageSeeds, issues);
   if (stageSeeds) params.stageSeeds = stageSeeds;
+
+  if (source.terrainModel !== undefined) {
+    if (source.terrainModel === "plates" || source.terrainModel === "fbm") {
+      params.terrainModel = source.terrainModel;
+    } else {
+      issues.add("params.terrainModel", "地形模型无效，已回退为默认值");
+    }
+  }
+
+  if (source.tectonicPlates !== undefined) {
+    if (isFiniteNumber(source.tectonicPlates)) {
+      const rounded = Math.round(source.tectonicPlates);
+      if (rounded !== source.tectonicPlates) issues.add("params.tectonicPlates", "板块数量已取整");
+      params.tectonicPlates = issues.clamp(rounded, 4, 64, "params.tectonicPlates", "板块数量");
+    } else {
+      issues.add("params.tectonicPlates", "板块数量不是有效数字，已忽略");
+    }
+  }
   return params;
 }
 
@@ -672,6 +690,27 @@ export function normalizeWorldDocument(input: unknown): NormalizedDocument {
     }
 
     const fallback = createDefaultDocument();
+    // Algorithm migration: absent / < 2 means a legacy world; force the old
+    // fBm terrain so imported worlds keep their exact pre-v0.5 appearance.
+    let algorithmVersion: number | undefined;
+    if (input.algorithmVersion !== undefined) {
+      if (isFiniteNumber(input.algorithmVersion)) {
+        const rounded = Math.round(input.algorithmVersion);
+        if (rounded !== input.algorithmVersion) {
+          issues.add("algorithmVersion", "算法版本已取整");
+        }
+        algorithmVersion = rounded;
+      } else {
+        issues.add("algorithmVersion", "算法版本不是有效数字，按旧世界处理");
+      }
+    }
+    const params = normalizeParams(input.params, issues);
+    const legacy = !(typeof algorithmVersion === "number" && algorithmVersion >= 2);
+    if (legacy) {
+      params.terrainModel = "fbm";
+    } else if (params.terrainModel === undefined) {
+      params.terrainModel = "plates";
+    }
     const name =
       normalizeText(input.name, MAX_NAME_LENGTH) ?? fallback.name;
     if (input.name !== undefined && normalizeText(input.name, MAX_NAME_LENGTH) === null) {
@@ -686,10 +725,11 @@ export function normalizeWorldDocument(input: unknown): NormalizedDocument {
     return {
       document: {
         version: 1,
+        ...(algorithmVersion === undefined ? {} : { algorithmVersion }),
         id,
         name,
         seed: isFiniteNumber(seed) ? Math.round(seed) : fallback.seed,
-        params: normalizeParams(input.params, issues),
+        params,
         style: normalizeStyle(input.style, name, issues),
         overrides: normalizeOverrides(input.overrides, issues),
         settlements: normalizeSettlements(input.settlements, issues),

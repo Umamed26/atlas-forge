@@ -53,6 +53,7 @@ import {
 } from "../lib/history";
 import type { ReadabilityReport } from "@atlas/render";
 import { assessReadabilityLocal } from "../lib/readability";
+import { readAlgorithm, withPlatesAlgorithm } from "../lib/worldAlgorithm";
 import {
   SCENARIOS,
   countScenarioParamDiffs,
@@ -233,6 +234,9 @@ export interface WorldStore {
   placeRename: PlaceSelection | null;
   toast: ToastMessage | null;
 
+  // ── v0.5 diagnostics / algorithm ──
+  climateOverlay: boolean;
+
   // ── generation experience (v0.4) ──
   scenarioId: string;
   locks: LockState;
@@ -318,7 +322,9 @@ export interface WorldStore {
   recoverAutosave(): void;
   clearCorruptedAutosave(): void;
 
-  // ── generation experience (v0.4) ──
+  // ── v0.5 diagnostics / algorithm ──
+  setClimateOverlay(enabled: boolean): void;
+  upgradeAlgorithm(): void;
   applyScenario(scenarioId: string, options?: { seed?: number }): void;
   setLock(key: LockKey, locked: boolean): void;
   rerollUnlocked(): void;
@@ -515,6 +521,7 @@ export const useWorldStore = create<WorldStore>()((set, get) => {
     },
     placeRename: null,
     toast: null,
+    climateOverlay: false,
     scenarioId: (() => {
       const stored = readStoredString(UI_PREF_KEYS.scenarioId, "");
       if (stored && SCENARIOS.some((scenario) => scenario.id === stored)) return stored;
@@ -753,7 +760,13 @@ export const useWorldStore = create<WorldStore>()((set, get) => {
         riverDraft: { active: false, points: [] },
         simTick: get().simTick + 1,
         simMode: "now",
-        toast: makeToast("success", `已导入世界「${document.name || "未命名"}」`),
+        toast:
+          readAlgorithm(document).kind === "classic"
+            ? makeToast(
+                "info",
+                "此世界使用经典算法，已保持原貌；新建世界使用板块算法",
+              )
+            : makeToast("success", `已导入世界「${document.name || "未命名"}」`),
       });
     },
 
@@ -1130,6 +1143,24 @@ export const useWorldStore = create<WorldStore>()((set, get) => {
       }
     },
 
+    // ── v0.5 diagnostics / algorithm ───────────────────────────────────
+    setClimateOverlay: (enabled) => {
+      set({ climateOverlay: enabled });
+    },
+
+    upgradeAlgorithm: () => {
+      const { document } = get();
+      if (readAlgorithm(document).kind === "plates") {
+        get().pushToast("info", "当前世界已经是板块算法");
+        return;
+      }
+      get().commitDocument(withPlatesAlgorithm(document), {
+        history: "push",
+        sim: "now",
+        render: true,
+      });
+      get().pushToast("success", "已升级为板块算法；外观会变化，可撤销回经典算法");
+    },
 
     // ── generation experience (v0.4) ───────────────────────────────────
     applyScenario: (scenarioId, options = {}) => {

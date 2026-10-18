@@ -27,6 +27,11 @@ export interface ClimateInput {
    * fixed noise constants; absent = legacy behaviour, bit-for-bit identical.
    */
   seed?: number;
+  /**
+   * v0.5 causal climate: add a distance-to-sea continentality term (interior
+   * air is drier). Absent/false = legacy climate, bit-for-bit identical.
+   */
+  modern?: boolean;
 }
 
 export interface ClimateResult {
@@ -54,6 +59,68 @@ function windDirection(lat: number, bands: boolean, angleDeg: number): { dx: num
   }
   const rad = angle * DEG;
   return { dx: Math.cos(rad), dy: Math.sin(rad) };
+}
+
+/**
+ * Multi-source BFS from ocean cells: normalized distance-to-sea for every land
+ * cell (0 at the coast, 1 deep inside a continent). Used by the v0.5 causal
+ * moisture model. Cost: one 8-neighbour BFS (~15ms @ 1024²).
+ */
+function distanceToSea(size: number, ocean: Uint8Array): Float32Array {
+  const cells = size * size;
+  const dist = new Int32Array(cells);
+  dist.fill(-1);
+  const queue = new Int32Array(cells);
+  let head = 0;
+  let tail = 0;
+  for (let i = 0; i < cells; i += 1) {
+    if (ocean[i] === 1) {
+      dist[i] = 0;
+      queue[tail++] = i;
+    }
+  }
+  const maxDist = Math.max(1, Math.round(size * 0.32));
+  while (head < tail) {
+    const cell = queue[head++];
+    const nextDistance = dist[cell] + 1;
+    if (nextDistance > maxDist) continue;
+    const x = cell % size;
+    const y = (cell / size) | 0;
+    if (x > 0) {
+      const n = cell - 1;
+      if (dist[n] === -1) {
+        dist[n] = nextDistance;
+        queue[tail++] = n;
+      }
+    }
+    if (x < size - 1) {
+      const n = cell + 1;
+      if (dist[n] === -1) {
+        dist[n] = nextDistance;
+        queue[tail++] = n;
+      }
+    }
+    if (y > 0) {
+      const n = cell - size;
+      if (dist[n] === -1) {
+        dist[n] = nextDistance;
+        queue[tail++] = n;
+      }
+    }
+    if (y < size - 1) {
+      const n = cell + size;
+      if (dist[n] === -1) {
+        dist[n] = nextDistance;
+        queue[tail++] = n;
+      }
+    }
+  }
+  const normalized = new Float32Array(cells);
+  const inv = 1 / maxDist;
+  for (let i = 0; i < cells; i += 1) {
+    normalized[i] = dist[i] <= 0 ? 0 : clamp01(dist[i] * inv);
+  }
+  return normalized;
 }
 
 export function computeClimate(input: ClimateInput): ClimateResult {
@@ -113,6 +180,10 @@ export function computeClimate(input: ClimateInput): ClimateResult {
     }
   }
 
+  // ── Causal continentality (v0.5): distance to the nearest ocean ────────
+  const modern = input.modern === true;
+  const continental = modern ? distanceToSea(size, ocean) : undefined;
+
   // ── Moisture advection ─────────────────────────────────────────────────
   const angle = Number.isFinite(input.windAngle) ? input.windAngle : 0;
   const bias = clamp(input.moistureBias, -0.5, 0.5);
@@ -155,7 +226,11 @@ export function computeClimate(input: ClimateInput): ClimateResult {
             equilibriumBase * 0.95 + sampleField(moistNoise, noiseRes, u, v) * 0.2,
           );
           m = transported * (1 - rainFraction);
-          m += (equilibrium - m) * relax;
+          if (continental !== undefined) {
+            m += (equilibrium * (1 - 0.55 * continental[i]) - m) * relax;
+          } else {
+            m += (equilibrium - m) * relax;
+          }
         }
         moisture[i] = m;
         upM = m;
@@ -192,7 +267,11 @@ export function computeClimate(input: ClimateInput): ClimateResult {
             columnBase[x] * 0.95 + sampleField(moistNoise, noiseRes, u, v) * 0.2,
           );
           m = transported * (1 - rainFraction);
-          m += (equilibrium - m) * relax;
+          if (continental !== undefined) {
+            m += (equilibrium * (1 - 0.55 * continental[i]) - m) * relax;
+          } else {
+            m += (equilibrium - m) * relax;
+          }
         }
         moisture[i] = m;
         upM = m;
@@ -236,6 +315,39 @@ export function computeClimate(input: ClimateInput): ClimateResult {
     moisture[i] = blended[i];
     if (temperature[i] < 0) temperature[i] = 0;
     else if (temperature[i] > 1) temperature[i] = 1;
+  }
+
+  // v0.5: two separable binomial passes remove the scanline/advection stripes
+  // left by the directional sweep (legacy path keeps the original output).
+  if (modern) {
+    let src = moisture;
+    let dst = new Float32Array(cells);
+    for (let pass = 0; pass < 2; pass += 1) {
+      for (let y = 0; y < size; y += 1) {
+        const row = y * size;
+        for (let x = 0; x < size; x += 1) {
+          const i = row + x;
+          const left = x > 0 ? src[i - 1] : src[i];
+          const right = x < size - 1 ? src[i + 1] : src[i];
+          dst[i] = (left + 2 * src[i] + right) * 0.25;
+        }
+      }
+      const swap = src;
+      src = dst;
+      dst = swap;
+    }
+    for (let y = 0; y < size; y += 1) {
+      const row = y * size;
+      for (let x = 0; x < size; x += 1) {
+        const i = row + x;
+        const up = y > 0 ? src[i - size] : src[i];
+        const down = y < size - 1 ? src[i + size] : src[i];
+        dst[i] = (up + 2 * src[i] + down) * 0.25;
+      }
+    }
+    for (let i = 0; i < cells; i += 1) {
+      moisture[i] = clamp01(dst[i] + bias);
+    }
   }
 
   return { temperature, moisture };

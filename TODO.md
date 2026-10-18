@@ -241,3 +241,22 @@ pnpm build
 **验证汇总**：typecheck ×5 包；core 82 tests（13 files）；render synthetic+readability 全绿；web build；`qa:render` 8/8 视觉一致；`qa:visual` PASS；`qa-ui` 200/200；Lead `qa-gen-ux` 20/20 + `qa-browser` 全绿（0 console/page/request error）。
 
 **已知限制**：锁住阶段不写显式 subs seed，故「换一张」时 seed 编号后缀不变；应用场景预设等价新建世界（会重置用户地点，可撤销）；可读性仅生成/预设后计算，纯风格改动后横幅可能滞后。
+
+## 16. v0.5.0 生成算法商用级（2026-10-19）
+
+**目标**：把生成从「调参能出好看图」升级为「地理成因可验证 + 跨端可复现 + 可交付矢量成品」。
+
+| 项 | 结果 | 证据 |
+| --- | --- | --- |
+| 因果气候 | ✅ 纬度/海拔/距海 BFS/风带/雨影；Whittaker 群系；雪线随纬度 | core climate/biome 单测；qa:algo 群系≥12 |
+| 河流拓扑 | ✅ Strahler 级序 + 宽度 √flow + 三角洲 + 无悬挂河 | qa:algo 悬挂河 0.00%、级序 ≥4；core 30-seed 不变量 |
+| 湖泊治理 | ✅ 单湖 ≤2%、内陆盆地抬升；消除 6% 湖泊异常 | qa:algo 单湖 ≤0.60%；诊断图对比 |
+| 板块构造（可选） | ⚠️ 已实现（Voronoi 板块/收敛造山带/离散裂谷），**实验性**：细节不及 fBm，默认关闭 | `terrainModel:"plates"`；UI 一键试用/撤销；qa:algo 对默认模型全绿 |
+| 算法门禁 | ✅ 9 项分布断言 + P95 延迟，CI 内置 | `pnpm qa:algo` 9/9；`--full` 120 seed 9/9 |
+| 视觉基线解耦 | ✅ 改用固定合成地形 fixture，算法升级不再使基线失效 | `qa:visual` 4/4；manifest fixtureVersion |
+| 性能 | ✅ 修复 O(n²) 湖泊扫描：最慢 seed 3.4s → 53ms；1024² p95 379–425ms | qa:algo 报表 out/qa-algo.json |
+| 矢量导出 | ✅ SVG 分层矢量 + A3@300dpi + 服务端端点 | render svg 7 tests；1024² 198KB/774ms |
+| 旧世界兼容 | ✅ 缺 algorithmVersion → fbm+旧管线逐字节一致；可一键试用板块并撤销 | stage-seeds 黄金哈希 82 tests 全绿 |
+| 诊断面板 | ✅ 地形/水文/气候/群系/性能 + 气候叠加 | qa-ui 227/227；截图 30-algorithm-badge |
+
+**取舍说明**：板块地形没有作为默认——它在成因上正确，但视觉质量（海岸/山带细节）仍不及已验证的 fBm 骨架；按「不把退化当升级」的原则，默认保留 fBm + 现代气候/河网管线，板块作为可选项并在文档中标注实验性。

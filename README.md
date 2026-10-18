@@ -1,5 +1,7 @@
 # Atlas Forge · 程序化世界地图生成器
 
+[![CI](https://github.com/Umamed26/atlas-forge/actions/workflows/ci.yml/badge.svg)](https://github.com/Umamed26/atlas-forge/actions/workflows/ci.yml) · [github.com/Umamed26/atlas-forge](https://github.com/Umamed26/atlas-forge)
+
 > 面向小说 / 世界观创作者的 Web 工具：用「种子 + 参数 + 少量画笔」，几分钟内生成一张**自洽、可编辑、可导出**的羊皮纸世界地图。
 
 ![Atlas Forge 应用界面](examples/app-screenshot.png)

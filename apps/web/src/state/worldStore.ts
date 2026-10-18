@@ -7,6 +7,7 @@
  * `renderTick` so a style tweak never re-simulates the world.
  */
 import {
+  DEFAULT_PARAMS,
   DEFAULT_STYLE,
   createDefaultDocument,
   type BiomeId,
@@ -46,8 +47,36 @@ import {
 } from "../lib/documentIO";
 import type { PlaceHitBox } from "../lib/placeHitTest";
 import {
+  MAX_GENERATION_HISTORY,
+  createThumbnail,
+  type GenerationHistoryEntry,
+} from "../lib/history";
+import type { ReadabilityReport } from "@atlas/render";
+import { assessReadabilityLocal } from "../lib/readability";
+import {
+  SCENARIOS,
+  countScenarioParamDiffs,
+  findClosestScenarioId,
+  randomScenarioId,
+  scenarioBaselineParams,
+  scenarioById,
+} from "../lib/scenarios";
+import {
+  DEFAULT_LOCKS,
+  LOCK_KEYS,
+  describeLockToast,
+  explicitStageSeeds,
+  randomStageSeed,
+  seedLabel,
+  withStageSeeds,
+  type LockKey,
+  type LockState,
+} from "../lib/stageSeeds";
+import {
+  readStoredBoolean,
   readStoredString,
   UI_PREF_KEYS,
+  writeStoredBoolean,
   writeStoredString,
 } from "../lib/uiPrefs";
 import {
@@ -98,8 +127,11 @@ export interface AutosaveRecoveryState {
   backupSavedAt: number | null;
 }
 
+export type GenerationKind = "full" | "draft";
+
 export interface GenerationStatus {
   phase: GenerationPhase;
+  kind: GenerationKind;
   seq: number;
   progress: ProgressUpdate | null;
   error: string | null;
@@ -159,10 +191,16 @@ export interface PlaceToolState {
   armed: boolean;
 }
 
+export interface ScenarioRuntimeState {
+  scenarioId: string;
+}
+
 export interface CommitOptions {
   history?: "push" | "pending" | "none";
   sim?: SimTrigger;
   render?: boolean;
+  /** While true the sim request is a 512² draft preview, not a full rebuild. */
+  draft?: boolean;
 }
 
 export interface WorldStore {
@@ -195,6 +233,24 @@ export interface WorldStore {
   placeRename: PlaceSelection | null;
   toast: ToastMessage | null;
 
+  // ── generation experience (v0.4) ──
+  scenarioId: string;
+  locks: LockState;
+  generationHistory: GenerationHistoryEntry[];
+  historyPending: boolean;
+  suppressNextHistoryPush: boolean;
+  draftActive: boolean;
+  draftRequests: number;
+  draftResults: number;
+  draftLayers: WorldLayers | null;
+  draftDocument: WorldDocument | null;
+  readability: ReadabilityReport | null;
+  readabilityDismissed: boolean;
+  readabilityPending: boolean;
+  requestSizeOverride: number | null;
+  cancelTick: number;
+  simKind: GenerationKind;
+
   // ── polish: export / performance / autosave recovery ──
   exportSize: number;
   perf: PerfMetrics;
@@ -210,7 +266,7 @@ export interface WorldStore {
   undo(): void;
   redo(): void;
 
-  updateParams(patch: Partial<WorldParams>, options?: { history?: CommitOptions["history"]; sim?: SimTrigger }): void;
+  updateParams(patch: Partial<WorldParams>, options?: { history?: CommitOptions["history"]; sim?: SimTrigger; draft?: boolean }): void;
   resetParams(keys?: (keyof WorldParams)[]): void;
   updateStyle(patch: Partial<RenderStyle>, options?: { history?: CommitOptions["history"] }): void;
   applyPreset(preset: RenderStyle["preset"]): void;
@@ -262,14 +318,33 @@ export interface WorldStore {
   recoverAutosave(): void;
   clearCorruptedAutosave(): void;
 
+  // ── generation experience (v0.4) ──
+  applyScenario(scenarioId: string, options?: { seed?: number }): void;
+  setLock(key: LockKey, locked: boolean): void;
+  rerollUnlocked(): void;
+  rerollNames(): void;
+  requestDraftGeneration(): void;
+  requestQuickGeneration(): void;
+  requestCancelGeneration(): void;
+  markGenerationCancelled(seq: number): void;
+  setDraftResult(seq: number, layers: WorldLayers, document: WorldDocument): void;
+  noteDraftRequest(): void;
+  consumeRequestSizeOverride(): number | null;
+  setHistoryPending(pending: boolean): void;
+  pushGenerationHistory(entry: GenerationHistoryEntry): void;
+  restoreGenerationHistory(id: string): void;
+  setReadability(report: ReadabilityReport | null): void;
+  dismissReadability(): void;
+  setReadabilityPending(pending: boolean): void;
+
   // ── generation lifecycle (called by the worker client) ──
   requestGeneration(mode: SimTrigger): void;
   requestRender(): void;
   requestPipelineReset(): void;
   generationQueued(seq: number): void;
-  generationStarted(seq: number): void;
+  generationStarted(seq: number, kind?: GenerationKind): void;
   generationProgress(seq: number, update: ProgressUpdate): void;
-  generationSucceeded(seq: number, layers: WorldLayers, document: WorldDocument): void;
+  generationSucceeded(seq: number, layers: WorldLayers, document: WorldDocument, meta?: { size?: number }): void;
   generationFailed(seq: number, message: string): void;
   clearGenerationError(): void;
 
@@ -406,6 +481,7 @@ export const useWorldStore = create<WorldStore>()((set, get) => {
 
     generation: {
       phase: "idle",
+      kind: "full",
       seq: 0,
       progress: null,
       error: null,
@@ -439,6 +515,39 @@ export const useWorldStore = create<WorldStore>()((set, get) => {
     },
     placeRename: null,
     toast: null,
+    scenarioId: (() => {
+      const stored = readStoredString(UI_PREF_KEYS.scenarioId, "");
+      if (stored && SCENARIOS.some((scenario) => scenario.id === stored)) return stored;
+      return findClosestScenarioId(initial.document.params);
+    })(),
+    locks: (() => {
+      try {
+        const raw = readStoredString(UI_PREF_KEYS.locks, "");
+        if (!raw) return { ...DEFAULT_LOCKS };
+        const parsed = JSON.parse(raw) as Partial<LockState>;
+        const locks = { ...DEFAULT_LOCKS };
+        for (const key of LOCK_KEYS) {
+          if (typeof parsed[key] === "boolean") locks[key] = parsed[key] as boolean;
+        }
+        return locks;
+      } catch {
+        return { ...DEFAULT_LOCKS };
+      }
+    })(),
+    generationHistory: [],
+    historyPending: false,
+    suppressNextHistoryPush: false,
+    draftActive: false,
+    draftRequests: 0,
+    draftResults: 0,
+    draftLayers: null,
+    draftDocument: null,
+    readability: null,
+    readabilityDismissed: false,
+    readabilityPending: false,
+    requestSizeOverride: null,
+    cancelTick: 0,
+    simKind: "full",
     exportSize: (() => {
       const stored = Number(readStoredString(UI_PREF_KEYS.exportSize, "2048"));
       return stored === 1024 || stored === 2048 || stored === 4096 || stored === 8192
@@ -489,7 +598,10 @@ export const useWorldStore = create<WorldStore>()((set, get) => {
         document: { ...next, updatedAt: new Date().toISOString() },
         historyFuture: [],
       });
-      if (options.sim) get().requestGeneration(options.sim);
+      if (options.sim) {
+        if (options.draft) get().requestDraftGeneration();
+        else get().requestGeneration(options.sim);
+      }
       if (options.render) get().requestRender();
     },
 
@@ -534,6 +646,7 @@ export const useWorldStore = create<WorldStore>()((set, get) => {
         {
           history: options.history ?? "pending",
           sim: options.sim ?? "debounce",
+          draft: options.draft === true,
         },
       );
     },
@@ -1017,6 +1130,148 @@ export const useWorldStore = create<WorldStore>()((set, get) => {
       }
     },
 
+
+    // ── generation experience (v0.4) ───────────────────────────────────
+    applyScenario: (scenarioId, options = {}) => {
+      const scenario = scenarioById(scenarioId);
+      const { document } = get();
+      const seed =
+        options.seed ??
+        (scenario.seedStrategy === "fixed-salt" && typeof scenario.fixedSalt === "number"
+          ? scenario.fixedSalt
+          : Math.floor(Math.random() * 1_000_000_000));
+      const next = createDefaultDocument({
+        name: document.name,
+        seed,
+        params: {
+          ...DEFAULT_PARAMS,
+          ...scenario.params,
+          gridSize: document.params.gridSize,
+          namingLanguage: document.params.namingLanguage,
+        },
+        style: { ...DEFAULT_STYLE, ...scenario.style, title: document.name },
+      });
+      set({ scenarioId: scenario.id });
+      writeStoredString(UI_PREF_KEYS.scenarioId, scenario.id);
+      get().commitDocument(next, { history: "push", sim: "now", render: true });
+      get().pushToast("success", `已应用场景「${scenario.name}」`);
+    },
+
+    setLock: (key, locked) => {
+      set((state) => {
+        const locks = { ...state.locks, [key]: locked };
+        writeStoredString(UI_PREF_KEYS.locks, JSON.stringify(locks));
+        return { locks };
+      });
+    },
+
+    rerollUnlocked: () => {
+      const { document, locks } = get();
+      const seeds = explicitStageSeeds(document);
+      let style = document.style;
+      const changed: string[] = [];
+      const kept: string[] = [];
+      const stageByLock: { key: LockKey; stage: "terrain" | "climate" | "hydrology" | "human"; label: string }[] = [
+        { key: "coast", stage: "terrain", label: "海岸" },
+        { key: "climate", stage: "climate", label: "生态" },
+        { key: "hydrology", stage: "hydrology", label: "河流" },
+        { key: "human", stage: "human", label: "地名" },
+      ];
+      for (const item of stageByLock) {
+        if (locks[item.key]) {
+          // Keep the stage exactly as-is (explicit seed, or absent => seed fallback).
+          kept.push(item.label);
+          continue;
+        }
+        seeds[item.stage] = randomStageSeed();
+        changed.push(item.label);
+      }
+      if (locks.style) {
+        kept.push("风格");
+      } else {
+        style = {
+          ...style,
+          preset: style.preset === "parchment-classic" ? "aged-ink" : "parchment-classic",
+        };
+        changed.push("风格");
+      }
+      if (changed.length === 0) {
+        get().pushToast("info", "所有阶段都已锁定，没有可更换的内容");
+        return;
+      }
+      const next = withStageSeeds({ ...document, style }, seeds);
+      get().commitDocument(next, { history: "push", sim: "now", render: true });
+      get().pushToast(
+        "info",
+        changed.length > 0 ? describeLockToast(locks) : "所有阶段都已锁定，没有可更换的内容",
+      );
+    },
+
+    rerollNames: () => {
+      const { document } = get();
+      const seeds = explicitStageSeeds(document);
+      seeds.human = randomStageSeed();
+      get().commitDocument(withStageSeeds(document, seeds), { history: "push", sim: "now" });
+      get().pushToast("info", "已换一批地名；地形与河流保持不变");
+    },
+
+    setHistoryPending: (pending) => {
+      set({ historyPending: pending });
+    },
+
+    pushGenerationHistory: (entry) => {
+      set((state) => {
+        const previous = state.generationHistory;
+        const duplicate =
+          previous.length > 0 &&
+          previous[0].document.seed === entry.document.seed &&
+          previous[0].document.updatedAt === entry.document.updatedAt;
+        if (duplicate) return {};
+        return {
+          generationHistory: [entry, ...previous].slice(0, MAX_GENERATION_HISTORY),
+        };
+      });
+    },
+
+    restoreGenerationHistory: (id) => {
+      const { generationHistory, document, scenarioId, baseCanvas } = get();
+      const entry = generationHistory.find((item) => item.id === id);
+      if (!entry) return;
+      const currentEntry: GenerationHistoryEntry = {
+        id: `gen-${Date.now().toString(36)}-${generationHistory.length}`,
+        document: cloneDocumentForHistory(document),
+        scenarioId,
+        thumbnail: createThumbnail(baseCanvas),
+        createdAt: Date.now(),
+      };
+      set((state) => ({
+        generationHistory: [currentEntry, ...state.generationHistory].slice(
+          0,
+          MAX_GENERATION_HISTORY,
+        ),
+        suppressNextHistoryPush: true,
+        scenarioId: entry.scenarioId,
+      }));
+      writeStoredString(UI_PREF_KEYS.scenarioId, entry.scenarioId);
+      get().importDocument(entry.document);
+      get().pushToast(
+        "success",
+        `已恢复历史世界 #${seedLabel(entry.document.seed).slice(1)}`,
+      );
+    },
+
+    setReadability: (report) => {
+      set({ readability: report, readabilityDismissed: report ? false : true });
+    },
+
+    dismissReadability: () => {
+      set({ readabilityDismissed: true });
+    },
+
+    setReadabilityPending: (pending) => {
+      set({ readabilityPending: pending });
+    },
+
     // ── polish: export size / perf / hit boxes / autosave recovery ────
     setExportSize: (size) => {
       const allowed = [1024, 2048, 4096, 8192];
@@ -1066,7 +1321,85 @@ export const useWorldStore = create<WorldStore>()((set, get) => {
 
     // ── generation lifecycle ───────────────────────────────────────────
     requestGeneration: (mode) => {
-      set((state) => ({ simTick: state.simTick + 1, simMode: mode }));
+      set((state) => ({ simTick: state.simTick + 1, simMode: mode, simKind: "full" }));
+    },
+
+    requestDraftGeneration: () => {
+      set((state) => ({
+        simTick: state.simTick + 1,
+        simMode: "debounce",
+        simKind: "draft",
+      }));
+    },
+
+    requestQuickGeneration: () => {
+      set({
+        requestSizeOverride: 512,
+        simTick: get().simTick + 1,
+        simMode: "now",
+        simKind: "full",
+      });
+      get().pushToast("info", "快速模式：先用 512² 预览，满意后再全量生成");
+    },
+
+    requestCancelGeneration: () => {
+      set((state) => ({ cancelTick: state.cancelTick + 1 }));
+    },
+
+    markGenerationCancelled: (seq) => {
+      set((state) => {
+        if (state.generation.phase !== "generating" && state.generation.phase !== "queued") {
+          return {};
+        }
+        return {
+          generation: {
+            ...state.generation,
+            kind: "full",
+            phase: "idle",
+            seq,
+            progress: null,
+            queuedLatest: false,
+            finishedAt: Date.now(),
+          },
+          draftActive: false,
+          draftLayers: null,
+          draftDocument: null,
+          suppressNextHistoryPush: false,
+        };
+      });
+      get().pushToast("info", "已取消生成，保留上一张地图");
+    },
+
+    noteDraftRequest: () => {
+      set((state) => ({ draftRequests: state.draftRequests + 1 }));
+    },
+
+    setDraftResult: (seq, layers, document) => {
+      set((state) => {
+        if (seq < state.lastAppliedSeq) return {};
+        return {
+          draftActive: true,
+          draftResults: state.draftResults + 1,
+          draftLayers: layers,
+          draftDocument: document,
+          generation: {
+            ...state.generation,
+            phase: "idle",
+            kind: "draft",
+            seq,
+            progress: null,
+            error: null,
+            finishedAt: Date.now(),
+          },
+          renderTick: state.renderTick + 1,
+        };
+      });
+    },
+
+    consumeRequestSizeOverride: () => {
+      const size = get().requestSizeOverride;
+      if (size !== null) set({ requestSizeOverride: null });
+      return size;
     },
 
     requestRender: () => {
@@ -1092,10 +1425,11 @@ export const useWorldStore = create<WorldStore>()((set, get) => {
       }));
     },
 
-    generationStarted: (seq) => {
+    generationStarted: (seq, kind: GenerationKind = "full") => {
       set({
         generation: {
           phase: "generating",
+          kind,
           seq,
           progress: null,
           error: null,
@@ -1130,8 +1464,15 @@ export const useWorldStore = create<WorldStore>()((set, get) => {
           layers,
           layersDocument: document,
           lastAppliedSeq: seq,
+          draftActive: false,
+          draftLayers: null,
+          draftDocument: null,
+          readabilityPending: true,
+          historyPending: state.suppressNextHistoryPush ? false : true,
+          suppressNextHistoryPush: false,
           generation: {
             phase: "idle",
+            kind: "full",
             seq,
             progress: null,
             error: null,
@@ -1165,6 +1506,10 @@ export const useWorldStore = create<WorldStore>()((set, get) => {
               : null,
             queuedLatest: false,
           },
+          draftActive: false,
+          draftLayers: null,
+          draftDocument: null,
+          suppressNextHistoryPush: false,
           toast: makeToast("error", `生成失败：${message}`),
         };
       });

@@ -1,6 +1,6 @@
 {
   "name": "atlas-forge",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -11,7 +11,9 @@
     "test": "pnpm -r test",
     "typecheck": "pnpm -r typecheck",
     "qa:render": "tsx scripts/qa-render.ts",
-    "qa:browser": "node scripts/qa-browser.mjs"
+    "qa:browser": "node scripts/qa-browser.mjs",
+    "qa:baseline": "tsx scripts/visual-baseline.ts",
+    "qa:visual": "tsx scripts/visual-compare.ts"
   },
   "devDependencies": {
     "@atlas/core": "workspace:*",

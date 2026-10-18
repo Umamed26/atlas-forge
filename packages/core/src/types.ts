@@ -45,6 +45,19 @@ export const BIOME_NAMES: Record<BiomeId, string> = {
 };
 
 // ── Parameters ────────────────────────────────────────────────────────────
+
+/**
+ * Optional per-stage RNG seeds for "lock the coastline, re-roll only rivers"
+ * workflows. Each missing stage falls back to the document seed, which keeps
+ * old documents (no `stageSeeds` field at all) bit-for-bit reproducible.
+ */
+export interface StageSeeds {
+  terrain?: number;
+  hydrology?: number;
+  climate?: number;
+  human?: number;
+}
+
 export interface WorldParams {
   /** Preview simulation grid edge length (power of two). */
   gridSize: number;
@@ -78,6 +91,13 @@ export interface WorldParams {
    * "cjk" forces Chinese names, "latin" forces Latin names.
    */
   namingLanguage: "auto" | "cjk" | "latin";
+  /**
+   * Optional per-stage seeds. `stageSeeds.hydrology` also enables a small
+   * deterministic tie-break/threshold perturbation in the hydrology stage, so
+   * re-rolling it changes rivers/flow without touching the coastline.
+   * Absent = document.seed for every stage (identical to pre-v0.4 behaviour).
+   */
+  stageSeeds?: StageSeeds;
 }
 
 export interface RenderStyle {

@@ -29,6 +29,7 @@ import {
   type RiverForcePath,
   type Settlement,
   type SettlementKind,
+  type StageSeeds,
   type WorldDocument,
   type WorldOverrides,
   type WorldParams,
@@ -161,11 +162,12 @@ interface NumberRange {
 }
 
 const PARAM_RANGES: Record<
-  Exclude<keyof WorldParams, "gridSize" | "windBands" | "namingLanguage">,
+  Exclude<keyof WorldParams, "gridSize" | "windBands" | "namingLanguage" | "stageSeeds">,
   NumberRange
 > = {
   seaLevel: { min: 0.2, max: 0.7, label: "海平面" },
-  continentScale: { min: 0.5, max: 2.5, label: "大陆尺度" },
+  // Presets may push continentScale up to the pipeline clamp (4.0) for fragmented archipelagos; import must not lower it.
+  continentScale: { min: 0.25, max: 4, label: "大陆尺度" },
   continentality: { min: 0, max: 1, label: "大陆度" },
   warpStrength: { min: 0, max: 1, label: "海岸扭曲" },
   ridgeStrength: { min: 0, max: 1, label: "山脉强度" },
@@ -176,6 +178,33 @@ const PARAM_RANGES: Record<
   moistureBias: { min: -0.5, max: 0.5, label: "湿度偏差" },
   temperatureOffset: { min: -0.35, max: 0.35, label: "温度偏移" },
 };
+
+const STAGE_SEED_KEYS = ["terrain", "hydrology", "climate", "human"] as const;
+
+function normalizeStageSeeds(raw: unknown, issues: IssueCollector): StageSeeds | undefined {
+  if (raw === undefined) return undefined;
+  if (!isRecord(raw)) {
+    issues.add("params.stageSeeds", "阶段种子不是对象，已忽略");
+    return undefined;
+  }
+  const seeds: StageSeeds = {};
+  let hasValue = false;
+  for (const key of STAGE_SEED_KEYS) {
+    const value = raw[key];
+    if (value === undefined) continue;
+    if (!isFiniteNumber(value)) {
+      issues.add(`params.stageSeeds.${key}`, "阶段种子不是有效数字，已忽略");
+      continue;
+    }
+    const rounded = Math.round(value);
+    if (rounded !== value) {
+      issues.add(`params.stageSeeds.${key}`, "阶段种子已取整");
+    }
+    seeds[key] = rounded;
+    hasValue = true;
+  }
+  return hasValue ? seeds : undefined;
+}
 
 function normalizeParams(raw: unknown, issues: IssueCollector): WorldParams {
   const source = isRecord(raw) ? raw : {};
@@ -227,6 +256,9 @@ function normalizeParams(raw: unknown, issues: IssueCollector): WorldParams {
       issues.add("params.namingLanguage", "命名语言无效，已回退为 auto（按种子自动选择）");
     }
   }
+
+  const stageSeeds = normalizeStageSeeds(source.stageSeeds, issues);
+  if (stageSeeds) params.stageSeeds = stageSeeds;
   return params;
 }
 

@@ -53,6 +53,7 @@ import { clamp01, formatMs, isEditableTarget } from "../lib/utils";
 import { screenToWorld, useViewStore } from "../state/viewStore";
 import { useWorldStore, type BrushState } from "../state/worldStore";
 import { ProgressBar, Swatch } from "./ui";
+import { ReadabilityBanner } from "./ReadabilityBanner";
 
 const STAGES: PipelineStage[] = ["terrain", "hydrology", "climate", "biome", "human"];
 const RIVER_MIN_POINT_DISTANCE = 0.00499;
@@ -417,6 +418,7 @@ function GenerationOverlay() {
   const progress = useWorldStore((state) => state.generation.progress);
   const startedAt = useWorldStore((state) => state.generation.startedAt);
   const queuedLatest = useWorldStore((state) => state.generation.queuedLatest);
+  const kind = useWorldStore((state) => state.generation.kind);
   const [now, setNow] = useState(() => Date.now());
   const active = phase === "generating" || phase === "queued";
 
@@ -427,6 +429,7 @@ function GenerationOverlay() {
   }, [active]);
 
   if (!active) return null;
+  if (kind === "draft") return null;
   const percent = Math.round((progress?.progress ?? 0) * 100);
   const elapsed = startedAt ? Math.max(0, now - startedAt) : 0;
   const activeStage = progress?.stage ?? "terrain";
@@ -463,6 +466,16 @@ function GenerationOverlay() {
         {queuedLatest ? (
           <p className="progress-note">已提交最新参数，当前任务结束后立即重算。</p>
         ) : null}
+        <div className="progress-actions">
+          <button
+            type="button"
+            className="btn btn--small btn--ghost"
+            data-testid="gen-cancel"
+            onClick={() => useWorldStore.getState().requestCancelGeneration()}
+          >
+            取消生成
+          </button>
+        </div>
       </div>
     </div>
   );
@@ -482,10 +495,18 @@ function GenerationErrorBanner() {
         <button
           type="button"
           className="btn btn--small btn--primary"
-          data-testid="retry-generate"
+          data-testid="gen-retry"
           onClick={() => useWorldStore.getState().requestGeneration("now")}
         >
           重试
+        </button>
+        <button
+          type="button"
+          className="btn btn--small btn--ghost"
+          data-testid="gen-quick-mode"
+          onClick={() => useWorldStore.getState().requestQuickGeneration()}
+        >
+          快速模式（512²）
         </button>
         <button
           type="button"
@@ -576,6 +597,8 @@ export function MapStage() {
   const selectedPlace = useWorldStore((state) => state.selectedPlace);
   const placeArmed = useWorldStore((state) => state.placeTool.armed);
   const hitBoxes = useWorldStore((state) => state.hitBoxes);
+  const draftActive = useWorldStore((state) => state.draftActive);
+  const generationKind = useWorldStore((state) => state.generation.kind);
 
   // ── draw ────────────────────────────────────────────────────────────
   const draw = useCallback(() => {
@@ -1383,6 +1406,12 @@ export function MapStage() {
           aria-hidden="true"
         />
 
+        {draftActive ? (
+          <div className="gen-draft-badge" data-testid="gen-draft-badge">
+            <span aria-hidden="true">◔</span> 草稿 512²
+          </div>
+        ) : null}
+
         {dragGhost ? (
           <div
             className={`place-drag-ghost place-drag-ghost--${dragGhost.entity}`}
@@ -1440,6 +1469,7 @@ export function MapStage() {
           </button>
         </div>
 
+        <ReadabilityBanner />
         <GenerationOverlay />
         <GenerationErrorBanner />
         <EmptyStage />

@@ -218,3 +218,26 @@ pnpm build
 | 发布 | v0.3.0：main 提交 + tag + GitHub Release + CI 绿 | 见 GitHub Actions |
 
 **已知限制**：桌面优先（≥1024 不溢出，未承诺触控拖动/双击）；自动存档仅当前+上一份备份；取消服务端导出会产生一次预期中的 `ERR_ABORTED`。
+
+## 15. v0.4.0 生成体验打磨（2026-10-19）
+
+**主题**：让不懂参数的创作者 10 秒拿到一张能用的图，并且「换不坏」。
+
+**批准的流程变更（additive，向后兼容）**：`WorldParams.stageSeeds?: { terrain?, hydrology?, climate?, human? }` —— 每阶段有效种子 = stageSeeds.x ?? document.seed；未设置时输出与 v0.3.0 **逐字节一致**（`test/stage-seeds.test.ts` 用 3 组 v0.3.0 输出哈希常量固化）。这是「锁海岸只换河流」的技术前提。
+
+| 项 | 结果 | 证据 |
+| --- | --- | --- |
+| 场景预设首屏 | ✅ 4 预设打包参数+风格+命名，真缩略图，首次引导+可重开 | core SCENARIO_PRESETS（4 预设 1024² 可读性断言）；qa-gen-ux 首屏四卡；截图 examples/welcome-scenarios.png |
+| 锁定重掷 | ✅ 5 锁；锁海岸连换 3 次 height/ocean 层级哈希一致、river 变化 | core stage-seeds 13 用例；Lead E2E `getLayerSignature` 断言；qa-ui 200/200 |
+| 生成历史 | ✅ 最近 10 次缩略图，恢复前保留当前，只占 1 条撤销 | Lead E2E 历史恢复；ui-qa 23-history |
+| 换一批地名 | ✅ 只重掷 human 子 seed，height/river/biome 哈希不变 | Lead E2E；qa-ui |
+| 人话滑杆 | ✅ 结果语言 + 低/中/高 + 场景推荐刻度 + 恢复推荐 + 「已改 N 项」 | 截图 examples/locked-reroll.png；qa-ui |
+| 草稿预览/取消/失败保留 | ✅ 150ms 节流 512² 草稿（原先误用尾部防抖导致拖动中永不触发，已修）；可取消；失败保留旧图+重试/快速模式 | Lead 定位并提出节流方案；qa-ui 连续拖动断言；Lead qa-gen-ux 20/20 |
+| 可读性检查 | ✅ 生成后一次（5–6ms）：标签碰撞/越界/陆地比例/河流/密度/对比度 + 一键修复 | render readability 8 用例；截图 25-readability |
+| 视觉回归 | ✅ 8 条基准（4 预设×2 seed，512²）+ `qa:visual` 门禁进 CI | `qa:visual` 8/8 identical（renderer 1.3.0） |
+| 群岛构图 | ✅ 从「一块主陆」改为真群岛：seed 101/202/303 岛屿 21/34/22 块，最大岛 34/39/21% | core scenarios 测试；out/qa-preset-archipelago-101.png |
+| 群系可辨 | ✅ 冰原/苔原/沙漠/雨林在 256px 可区分，新增 biomeTint；aged-ink 保留色相 | render 前后对比图；qa:baseline 重建 |
+
+**验证汇总**：typecheck ×5 包；core 82 tests（13 files）；render synthetic+readability 全绿；web build；`qa:render` 8/8 视觉一致；`qa:visual` PASS；`qa-ui` 200/200；Lead `qa-gen-ux` 20/20 + `qa-browser` 全绿（0 console/page/request error）。
+
+**已知限制**：锁住阶段不写显式 subs seed，故「换一张」时 seed 编号后缀不变；应用场景预设等价新建世界（会重置用户地点，可撤销）；可读性仅生成/预设后计算，纯风格改动后横幅可能滞后。

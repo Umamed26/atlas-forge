@@ -563,6 +563,30 @@ async function main(): Promise<void> {
     results.push(`measure performance: ${bestMs.toFixed(2)}ms @1024 preview (target <= 8ms)`);
   }
 
+  // 11) Optional additive `style.biomeTint` (0..1) controls the biome wash
+  //     weight; the renderer reads it structurally so RenderStyle stays as-is.
+  {
+    const base = createSyntheticWorld({ size: 96, seed: 424242 });
+    const withTint = (value: number) => ({
+      ...base,
+      document: {
+        ...base.document,
+        style: { ...base.document.style, biomeTint: value },
+      },
+    });
+    const strong = render(withTint(0.95), 512, 512);
+    const soft = render(withTint(0.2), 512, 512);
+    assert.ok(!strong.png.equals(soft.png), "style.biomeTint has no effect on the biome wash");
+    const plain = render(base, 512, 512);
+    const explicitDefault = render(withTint(0.55), 512, 512);
+    assert.ok(
+      plain.png.equals(explicitDefault.png),
+      "default biome tint weight drifted from the documented 0.55",
+    );
+    assertPng(strong.png, "biomeTint strong");
+    results.push("biomeTint style override: 0.2 vs 0.95 differ, default == 0.55");
+  }
+
   void pixelStats;
   console.log("renderer synthetic tests passed:");
   for (const line of results) console.log(`  ✓ ${line}`);

@@ -23,6 +23,8 @@ interface GenerateRequest {
   type: "generate";
   seq: number;
   document: WorldDocument;
+  /** Optional simulation-size override (512² draft / quick mode). */
+  size?: number;
 }
 
 interface ResetRequest {
@@ -85,6 +87,7 @@ workerScope.onmessage = (event: MessageEvent<IncomingMessage>) => {
   try {
     const layers = pipeline.generate({
       document,
+      ...(typeof message.size === "number" ? { size: message.size } : {}),
       onProgress: (update: ProgressUpdate) => postProgress(seq, update),
     });
     workerScope.postMessage({ type: "layers", seq, layers, document }, transferables(layers));

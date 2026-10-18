@@ -91,7 +91,7 @@ export const ELEVATION_MODES: { id: ElevationMode; label: string; title: string 
 
 // ── Parameter metadata ────────────────────────────────────────────────────
 export interface ParamSliderDef {
-  key: Exclude<keyof WorldParams, "gridSize" | "windBands" | "namingLanguage">;
+  key: Exclude<keyof WorldParams, "gridSize" | "windBands" | "namingLanguage" | "stageSeeds">;
   label: string;
   min: number;
   max: number;
@@ -117,7 +117,7 @@ export const PARAM_GROUPS: ParamGroupDef[] = [
     note: "大陆形状、海岸与山脉的决定性参数。",
     sliders: [
       { key: "seaLevel", label: "海平面", min: 0.2, max: 0.7, step: 0.005, decimals: 3, hint: "越高，被海水淹没的面积越大" },
-      { key: "continentScale", label: "大陆尺度", min: 0.5, max: 2.5, step: 0.05, decimals: 2, hint: "越小，大陆越少越大" },
+      { key: "continentScale", label: "大陆尺度", min: 0.25, max: 4, step: 0.05, decimals: 2, hint: "越小，大陆越少越大；4.0 可用于真群岛" },
       { key: "continentality", label: "大陆度", min: 0, max: 1, step: 0.01, decimals: 2, hint: "地图边缘的径向海洋衰减强度" },
       { key: "warpStrength", label: "海岸扭曲", min: 0, max: 1, step: 0.01, decimals: 2, hint: "domain warp，让海岸线更自然" },
       { key: "ridgeStrength", label: "山脉强度", min: 0, max: 1, step: 0.01, decimals: 2 },
@@ -186,6 +186,84 @@ export const DEFAULT_PARAM_VALUES: WorldParams = {
   moistureBias: 0,
   temperatureOffset: 0,
   namingLanguage: "auto",
+};
+
+
+// ── Human-readable parameter copy (P1-1) ─────────────────────────────────
+export interface ParamReadability {
+  plain: string;
+  low: string;
+  mid: string;
+  high: string;
+}
+
+export const PARAM_READABILITY: Record<string, ParamReadability> = {
+  seaLevel: {
+    plain: "越高，陆地越少、海岸越碎；越低，大陆越完整。",
+    low: "多陆地",
+    mid: "均衡",
+    high: "多海洋",
+  },
+  continentScale: {
+    plain: "越小，大陆越少越大；越大，陆地越碎越多岛。",
+    low: "整块大陆",
+    mid: "常规",
+    high: "群岛密布",
+  },
+  continentality: {
+    plain: "控制地图边缘向内衰减的强度，越高边缘越容易变成海。",
+    low: "边缘少海",
+    mid: "自然",
+    high: "四面临海",
+  },
+  warpStrength: {
+    plain: "让海岸线更弯曲、更自然；过高会显得像噪声。",
+    low: "平直海岸",
+    mid: "自然曲折",
+    high: "极度破碎",
+  },
+  ridgeStrength: {
+    plain: "山脉的隆起强度；越高山系越明显、阴影越重。",
+    low: "平原为主",
+    mid: "丘陵起伏",
+    high: "高山连绵",
+  },
+  ridgeScale: {
+    plain: "山脉的尺度：越小山系越密，越大山系越宏伟。",
+    low: "细碎山脊",
+    mid: "常规山脉",
+    high: "巨型山系",
+  },
+  erosionIterations: {
+    plain: "侵蚀迭代越多，山脊越圆润、河谷越清晰。",
+    low: "原始地貌",
+    mid: "较自然",
+    high: "深度风化",
+  },
+  riverDensity: {
+    plain: "河流的数量；越高支流越多、平原更容易被切割。",
+    low: "仅主干河",
+    mid: "常规水系",
+    high: "水网密布",
+  },
+  windAngle: {
+    plain: "主导风向：影响雨影与湿润空气的推进方向。",
+    low: "西风",
+    mid: "斜风",
+    high: "东风",
+  },
+  moistureBias: {
+    plain: "整体更干（左）或更湿（右）；会影响荒漠与森林范围。",
+    low: "更干旱",
+    mid: "平衡",
+    high: "更湿润",
+  },
+  temperatureOffset: {
+    plain: "整体更冷（左）或更热（右）；会影响冰原与热带范围。",
+    low: "更寒冷",
+    mid: "平衡",
+    high: "更炎热",
+  },
 };
 
 // ── Style metadata ────────────────────────────────────────────────────────

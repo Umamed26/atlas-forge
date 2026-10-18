@@ -8,6 +8,9 @@
 import { BASE_RENDER_SIZE } from "./constants";
 import { countOverrides } from "./documentIO";
 import { collectPlaces, generatePlaceName, uniquePlaceName, type PlaceEntry } from "./places";
+import { assessReadabilityLocal } from "./readability";
+import { LOCK_KEYS, seedLabel } from "./stageSeeds";
+import { scenarioById } from "./scenarios";
 import {
   hitTestPlaces,
   placeHitBoxesForDebug,
@@ -70,6 +73,21 @@ export interface AtlasDebugSummary {
     lastRenderMs: number | null;
   };
   autosaveRecovery: { pending: boolean; hasBackup: boolean } | null;
+  scenarioId: string;
+  scenarioName: string;
+  locks: Record<string, boolean>;
+  generatedSummary: string;
+  generationKind: string;
+  generationHistoryCount: number;
+  historyCount: number;
+  activePreset: string;
+  draftActive: boolean;
+  draftRequests: number;
+  draftResults: number;
+  requestSizeOverride: number | null;
+  readability: { score: number; level: string; issues: string[] } | null;
+  readabilityDismissed: boolean;
+  layerSignature: { height: number; river: number; biome: number };
   places: {
     selected: { id: string; entity: string } | null;
     renaming: { id: string; entity: string } | null;
@@ -107,6 +125,30 @@ export interface AtlasDebugApi {
     deduped: string;
     randomSample: string;
   };
+  getGenerationHistory: () => {
+    id: string;
+    seed: number;
+    scenarioId: string;
+    thumbnail: string;
+    createdAt: number;
+  }[];
+  quickGenerate: () => void;
+  cancelGeneration: () => void;
+  /** Stable FNV-1a fingerprints for layer-identity E2E assertions. */
+  getLayerSignature: () => {
+    height: number;
+    ocean: number;
+    river: number;
+    biome: number;
+    temperature: number;
+  } | null;
+  /** Explicit per-stage seeds currently stored on the document (may be absent). */
+  getStageSeeds: () => {
+    terrain?: number;
+    hydrology?: number;
+    climate?: number;
+    human?: number;
+  } | null;
   /** Pure hit-priority probe using the same hitTestPlaces function as the UI. */
   testHitPriority: () => {
     hitId: string | null;
@@ -124,6 +166,27 @@ declare global {
   }
 }
 
+/** FNV-1a 32-bit over the full typed array (O(n) but computed on demand only). */
+function fnv1a32(array: ArrayLike<number>): number {
+  let hash = 2166136261;
+  for (let index = 0; index < array.length; index += 1) {
+    const value = Math.round(Number(array[index]) * 1000) | 0;
+    hash ^= value;
+    hash = Math.imul(hash, 16777619);
+  }
+  return hash >>> 0;
+}
+
+function sampleSignature(array: Float32Array | Uint8Array, step = 4093): number {
+  let hash = 2166136261;
+  for (let index = 0; index < array.length; index += step) {
+    const value = Math.round(Number(array[index]) * 1000) | 0;
+    hash ^= value;
+    hash = Math.imul(hash, 16777619);
+  }
+  return hash >>> 0;
+}
+
 function buildSummary(): AtlasDebugSummary {
   const state = useWorldStore.getState();
   const view = useViewStore.getState();
@@ -132,6 +195,14 @@ function buildSummary(): AtlasDebugSummary {
   const visibleSettlements = placeCollections.visible.filter(
     (entry) => entry.entity === "settlement",
   );
+  const localFallback = assessReadabilityLocal(state.document, state.layers);
+  const localFallbackReport = localFallback
+    ? {
+        score: 100 - localFallback.issues.length * 15,
+        level: localFallback.level,
+        issues: localFallback.issues.map((issue) => issue.id),
+      }
+    : null;
   return {
     version: "m6",
     name: state.document.name,
@@ -210,6 +281,35 @@ function buildSummary(): AtlasDebugSummary {
     autosaveRecovery: state.autosaveRecovery
       ? { pending: true, hasBackup: state.autosaveRecovery.hasBackup }
       : null,
+    scenarioId: state.scenarioId,
+    scenarioName: scenarioById(state.scenarioId).name,
+    locks: Object.fromEntries(LOCK_KEYS.map((key) => [key, state.locks[key]])),
+    generatedSummary: `${scenarioById(state.scenarioId).name} · ${seedLabel(state.document.seed)}`,
+    generationKind: state.generation.kind,
+    generationHistoryCount: state.generationHistory.length,
+    historyCount: state.generationHistory.length,
+    activePreset: state.scenarioId,
+    draftActive: state.draftActive,
+    draftRequests: state.draftRequests,
+    draftResults: state.draftResults,
+    requestSizeOverride: state.requestSizeOverride,
+    readability: state.readability
+      ? {
+          score: state.readability.score,
+          level: state.readability.issues.some((issue) => issue.severity === "fail")
+            ? "fail"
+            : "warn",
+          issues: state.readability.issues.map((issue) => issue.id),
+        }
+      : localFallbackReport,
+    readabilityDismissed: state.readabilityDismissed,
+    layerSignature: layers
+      ? {
+          height: sampleSignature(layers.height),
+          river: sampleSignature(layers.river),
+          biome: sampleSignature(layers.biome),
+        }
+      : { height: 0, river: 0, biome: 0 },
     places: {
       selected: state.selectedPlace ? { ...state.selectedPlace } : null,
       renaming: state.placeRename ? { ...state.placeRename } : null,
@@ -271,6 +371,32 @@ export function installDebugApi(): void {
         deduped: uniquePlaceName("新港", ["新港", "新港-2"]),
         randomSample: generatePlaceName("settlement", "city"),
       };
+    },
+    getGenerationHistory: () =>
+      useWorldStore.getState().generationHistory.map((entry) => ({
+        id: entry.id,
+        seed: entry.document.seed,
+        scenarioId: entry.scenarioId,
+        thumbnail: entry.thumbnail,
+        createdAt: entry.createdAt,
+      })),
+    quickGenerate: () => useWorldStore.getState().requestQuickGeneration(),
+    cancelGeneration: () => useWorldStore.getState().requestCancelGeneration(),
+    getLayerSignature: () => {
+      const layers = useWorldStore.getState().layers;
+      if (!layers) return null;
+      return {
+        height: fnv1a32(layers.height),
+        ocean: fnv1a32(layers.ocean),
+        river: fnv1a32(layers.river),
+        biome: fnv1a32(layers.biome),
+        temperature: fnv1a32(layers.temperature),
+      };
+    },
+    getStageSeeds: () => {
+      const seeds = (useWorldStore.getState().document.params as { stageSeeds?: Record<string, number> })
+        .stageSeeds;
+      return seeds ? { ...seeds } : null;
     },
     testHitPriority: () => {
       const entries = [

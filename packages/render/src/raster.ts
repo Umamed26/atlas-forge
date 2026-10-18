@@ -310,10 +310,18 @@ export function buildTerrainField(
         const biomeId = biome[i] ?? 0;
         const tintColor = biomeTints[biomeId] ?? biomeTints[0];
         const jitter = hashSigned(x, y, tintSeed);
-        let tintW = theme.biomeMix * (0.68 + 0.6 * jitter);
-        if (biomeId === 12) tintW *= 0.55; // beach
-        else if (biomeId === 14) tintW *= 0.4; // snow peak
-        else if (biomeId === 13) tintW *= 0.8; // mountain
+        let tintW = theme.biomeMix * (0.8 + 0.4 * jitter);
+        if (biomeId === 12) {
+          tintW *= 0.5; // beach
+        } else if (biomeId === 14) {
+          tintW = Math.min(1, tintW * 1.5 + 0.12); // snow peak — near white
+        } else if (biomeId === 2) {
+          tintW = Math.min(1, tintW * 1.65 + 0.12); // ice — pale cold blue sheet
+        } else if (biomeId === 3) {
+          tintW = Math.min(1, tintW * 1.45 + 0.08); // tundra — cold grey-green
+        } else if (biomeId === 13) {
+          tintW *= 0.85; // mountain
+        }
         if (tintW > 0) {
           r += (tintColor[0] - r) * tintW;
           g += (tintColor[1] - g) * tintW;
@@ -321,11 +329,20 @@ export function buildTerrainField(
         }
 
         // Cold wash toward the poles / high latitude.
-        const coldT = (1 - smoothstep(0.12, 0.32, temperature[i] ?? 0.5)) * 0.32;
+        // Polar cast: cold-temperature land drifts toward cool grey-blue so
+        // "polar frontier" reads cold at thumbnail size, while temperate maps
+        // keep their warm parchment tone (temperature-gated, subtle).
+        // Ice already carries its own pale-blue identity; the atmospheric cold
+        // cast mostly targets tundra / cold steppe / cold-biome fringes.
+        const castFactor = biomeId === 2 ? 0.15 : biomeId === 3 ? 0.8 : 0.45 * (1 - smoothstep(0.1, 0.5, height[i] - seaLevel));
+        const coldT = (1 - smoothstep(0.24, 0.64, temperature[i] ?? 0.5)) * 0.3 * castFactor;
         if (coldT > 0) {
-          r += (theme.land.cold[0] - r) * coldT;
-          g += (theme.land.cold[1] - g) * coldT;
-          b += (theme.land.cold[2] - b) * coldT;
+          const coldR = theme.land.cold[0] * 0.94;
+          const coldG = theme.land.cold[1];
+          const coldB = Math.min(255, theme.land.cold[2] * 1.03);
+          r += (coldR - r) * coldT;
+          g += (coldG - g) * coldT;
+          b += (coldB - b) * coldT;
         }
 
         // Faded coastal plain where land meets the sea.

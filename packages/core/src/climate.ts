@@ -9,7 +9,7 @@
  * pass removes scanline banding. The model is deliberately cheap: one pass
  * plus one smoothing pass, no back-tracing.
  */
-import { buildField, clamp, clamp01, fbm, sampleField } from "./rng";
+import { buildField, clamp, clamp01, fbm, hash2, sampleField } from "./rng";
 
 export interface ClimateInput {
   size: number;
@@ -21,6 +21,12 @@ export interface ClimateInput {
   windBands: boolean;
   moistureBias: number;
   temperatureOffset: number;
+  /**
+   * Optional climate sub-seed (stageSeeds.climate). When present, the
+   * temperature/moisture noise fields use this seed instead of the historical
+   * fixed noise constants; absent = legacy behaviour, bit-for-bit identical.
+   */
+  seed?: number;
 }
 
 export interface ClimateResult {
@@ -66,10 +72,20 @@ export function computeClimate(input: ClimateInput): ClimateResult {
   const seaSpan = Math.max(0.05, 1 - seaLevel);
   const invSize = 1 / size;
 
-  // Deterministic low-frequency climate noise.
+  // Deterministic low-frequency climate noise. The fixed constants are the
+  // historical (pre-stage-seed) behaviour; an explicit climate seed re-rolls
+  // only these noise fields.
   const noiseRes = Math.max(8, Math.min(size, 192));
-  const tempNoise = buildField(noiseRes, (u, v) => fbm(u * 3.1 + 4.7, v * 3.1 + 9.3, 1301, 3) - 0.5);
-  const moistNoise = buildField(noiseRes, (u, v) => fbm(u * 2.7 + 15.1, v * 2.7 + 2.9, 1709, 3) - 0.5);
+  const tempNoiseSeed =
+    input.seed === undefined ? 1301 : (hash2(input.seed, 0x7c, 0x5eed) | 0);
+  const moistNoiseSeed =
+    input.seed === undefined ? 1709 : (hash2(input.seed, 0x6d, 0x5eed) | 0);
+  const tempNoise = buildField(noiseRes, (u, v) =>
+    fbm(u * 3.1 + 4.7, v * 3.1 + 9.3, tempNoiseSeed, 3) - 0.5,
+  );
+  const moistNoise = buildField(noiseRes, (u, v) =>
+    fbm(u * 2.7 + 15.1, v * 2.7 + 2.9, moistNoiseSeed, 3) - 0.5,
+  );
 
   // ── Temperature ────────────────────────────────────────────────────────
   const rowHumidity = new Float32Array(size);

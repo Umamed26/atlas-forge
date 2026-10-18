@@ -17,7 +17,9 @@ import {
 import { installDebugApi } from "../lib/debug";
 import { loadRenderFonts } from "../lib/fonts";
 import { saveAutosave } from "../lib/documentIO";
+import { createThumbnail } from "../lib/history";
 import { collectPlaces } from "../lib/places";
+import { assessReadabilityWithRender } from "../lib/readability";
 import {
   measureRenderPlaceBoxes,
   synthesizeMarkerBoxes,
@@ -26,19 +28,34 @@ import { renderMapToCanvas } from "../lib/renderMap";
 import { refreshServerStatus } from "../lib/api";
 import { useWorldStore } from "../state/worldStore";
 
+/** Draft previews are throttled, not debounced: while a slider is dragged the
+ * user must see a 512² preview roughly every 150ms (leading + trailing). */
+const DRAFT_THROTTLE_MS = 150;
+
 export function useAppPipeline(): void {
   const clientRef = useRef<GenerationClient | null>(null);
   const renderTimerRef = useRef<number | null>(null);
+  const draftTimerRef = useRef<number | null>(null);
+  const lastDraftAtRef = useRef(0);
+  const lastFullRequestAtRef = useRef(0);
 
   // ── Worker lifecycle + initial generation ────────────────────────────
   useEffect(() => {
     const client = new GenerationClient({
-      onDispatch: (seq) => useWorldStore.getState().generationStarted(seq),
+      onDispatch: (seq, _document, options) =>
+        useWorldStore.getState().generationStarted(seq, options.draft ? "draft" : "full"),
       onQueued: (seq) => useWorldStore.getState().generationQueued(seq),
       onProgress: (seq, update) => useWorldStore.getState().generationProgress(seq, update),
-      onLayers: (seq, layers, document) =>
-        useWorldStore.getState().generationSucceeded(seq, layers, document),
+      onLayers: (seq, layers, document, meta) => {
+        const store = useWorldStore.getState();
+        if (meta.draft) {
+          store.setDraftResult(seq, layers, document);
+          return;
+        }
+        store.generationSucceeded(seq, layers, document, { size: meta.size ?? undefined });
+      },
       onError: (seq, message) => useWorldStore.getState().generationFailed(seq, message),
+      onCancelled: (seq) => useWorldStore.getState().markGenerationCancelled(seq),
     });
     client.start();
     clientRef.current = client;
@@ -56,19 +73,77 @@ export function useAppPipeline(): void {
     clientRef.current?.reset();
   }, [pipelineResetTick]);
 
-  // ── Debounced regeneration ───────────────────────────────────────────
+  // ── Regeneration scheduling ──────────────────────────────────────────
+  // Full rebuilds are debounced (wait for the user to settle). Draft previews
+  // are *throttled*: dragging a slider emits updates every 16–80ms, so a pure
+  // debounce would starve the draft request and the user would never see it.
   const simTick = useWorldStore((state) => state.simTick);
   useEffect(() => {
     if (simTick === 0) return;
-    const mode = useWorldStore.getState().simMode;
+    const store = useWorldStore.getState();
+    const mode = store.simMode;
+    const kind = store.simKind;
+
+    if (kind === "draft") {
+      // A draft request is already scheduled for the current throttle window;
+      // keep it (its callback reads the latest document when it fires).
+      if (draftTimerRef.current !== null) return;
+      const sendDraft = () => {
+        draftTimerRef.current = null;
+        lastDraftAtRef.current = Date.now();
+        const client = clientRef.current;
+        if (!client) return;
+        // A full rebuild was requested moments ago (slider released): never let
+        // a late trailing draft replace the full job in the latest-wins queue.
+        if (Date.now() - lastFullRequestAtRef.current < 400) return;
+        const state = useWorldStore.getState();
+        state.noteDraftRequest();
+        client.request(state.document, { size: 512, draft: true });
+      };
+      const since = Date.now() - lastDraftAtRef.current;
+      const wait = Math.max(0, DRAFT_THROTTLE_MS - since);
+      draftTimerRef.current = window.setTimeout(sendDraft, wait);
+      return;
+    }
+
+    // A full request takes precedence: drop any pending trailing draft so it
+    // cannot replace the full job in the client's latest-wins queue.
+    if (draftTimerRef.current !== null) {
+      window.clearTimeout(draftTimerRef.current);
+      draftTimerRef.current = null;
+    }
+    lastFullRequestAtRef.current = Date.now();
     const delay = mode === "now" ? 0 : SIM_DEBOUNCE_MS;
     const timer = window.setTimeout(() => {
       const client = clientRef.current;
       if (!client) return;
-      client.request(useWorldStore.getState().document);
+      const state = useWorldStore.getState();
+      const sizeOverride = state.consumeRequestSizeOverride();
+      client.request(
+        state.document,
+        typeof sizeOverride === "number" ? { size: sizeOverride } : {},
+      );
     }, delay);
     return () => window.clearTimeout(timer);
   }, [simTick]);
+
+  // Clear a pending draft timer on unmount (the effect above intentionally has
+  // no per-tick cleanup for drafts, so it is not reset by every pointermove).
+  useEffect(() => {
+    return () => {
+      if (draftTimerRef.current !== null) {
+        window.clearTimeout(draftTimerRef.current);
+        draftTimerRef.current = null;
+      }
+    };
+  }, []);
+
+  // ── Cancel the in-flight generation (terminates + recreates the worker) ──
+  const cancelTick = useWorldStore((state) => state.cancelTick);
+  useEffect(() => {
+    if (cancelTick === 0) return;
+    clientRef.current?.cancel();
+  }, [cancelTick]);
 
   // ── Base map rasterization (style-only changes land here) ────────────
   const renderTick = useWorldStore((state) => state.renderTick);
@@ -78,22 +153,44 @@ export function useAppPipeline(): void {
     renderTimerRef.current = window.setTimeout(() => {
       renderTimerRef.current = null;
       const state = useWorldStore.getState();
-      if (!state.layers) return;
+      const drafting = state.draftActive && state.draftLayers !== null;
+      const renderLayers = drafting ? state.draftLayers : state.layers;
+      const renderDocument = drafting ? state.draftDocument ?? state.document : state.document;
+      if (!renderLayers) return;
       state.renderStarted();
       const startedAt = performance.now();
       try {
-        const canvas = renderMapToCanvas(state.layers, state.document, BASE_RENDER_SIZE, "preview");
+        const canvas = renderMapToCanvas(renderLayers, renderDocument, BASE_RENDER_SIZE, "preview");
         useWorldStore.getState().renderDone(canvas, performance.now() - startedAt);
         try {
-          const boxes = measureRenderPlaceBoxes(state.document, state.layers);
+          const boxes = measureRenderPlaceBoxes(renderDocument, renderLayers);
           if (boxes) {
             useWorldStore.getState().setHitBoxes(boxes, "renderer");
           } else {
-            const visible = collectPlaces(state.document, state.layers).visible;
+            const visible = collectPlaces(renderDocument, renderLayers).visible;
             useWorldStore.getState().setHitBoxes(synthesizeMarkerBoxes(visible), "marker");
           }
         } catch {
           useWorldStore.getState().setHitBoxes(null, null);
+        }
+        if (!drafting) {
+          const latest = useWorldStore.getState();
+          if (latest.readabilityPending) {
+            latest.setReadabilityPending(false);
+            latest.setReadability(
+              assessReadabilityWithRender(canvas, latest.document, latest.layers),
+            );
+          }
+          if (latest.historyPending) {
+            latest.setHistoryPending(false);
+            latest.pushGenerationHistory({
+              id: `gen-${Date.now().toString(36)}`,
+              document: latest.layersDocument ?? latest.document,
+              scenarioId: latest.scenarioId,
+              thumbnail: createThumbnail(canvas),
+              createdAt: Date.now(),
+            });
+          }
         }
       } catch (error) {
         useWorldStore

@@ -178,14 +178,25 @@ export function createPipeline(): Pipeline {
       const caching = cells <= MAX_CACHED_CELLS;
       const overrides = normalizeOverrides(document.overrides);
 
+      // Per-stage sub-seeds (additive, optional). Absent fields fall back to the
+      // document seed, so v0.3 documents keep producing identical layers; the
+      // hydrology/climate perturbations only activate when explicitly seeded.
+      const rawStageSeeds = params.stageSeeds ?? {};
+      const finiteSeed = (value: number | undefined): number | undefined =>
+        typeof value === "number" && Number.isFinite(value) ? value : undefined;
+      const terrainSeed = finiteSeed(rawStageSeeds.terrain) ?? document.seed;
+      const hydrologySeed = finiteSeed(rawStageSeeds.hydrology);
+      const climateSeed = finiteSeed(rawStageSeeds.climate);
+      const humanSeed = finiteSeed(rawStageSeeds.human) ?? document.seed;
+
       const elevationKey = elevationStampKey(overrides.elevation);
       const riverKey = riverForceKey(overrides.riverForce);
       const biomeKey = biomeStampKey(overrides.biome);
-      const terrainKey = `t|${size}|${document.seed}|${terrainSignature(params)}|${elevationKey}|${riverKey}`;
-      const hydrologyKey = `${terrainKey}§h|${hydrologySignature(params)}`;
-      const climateKey = `${terrainKey}§c|${climateSignature(params)}`;
+      const terrainKey = `t|${size}|${terrainSeed}|${terrainSignature(params)}|${elevationKey}|${riverKey}`;
+      const hydrologyKey = `${terrainKey}§h|${hydrologySignature(params)}|hs:${hydrologySeed ?? "none"}`;
+      const climateKey = `${terrainKey}§c|${climateSignature(params)}|cs:${climateSeed ?? "none"}`;
       const biomeFingerprint = `${climateKey}§b|${biomeKey}`;
-      const humanFingerprint = `${biomeFingerprint}§u|${hydrologyKey}|${params.namingLanguage ?? "auto"}|${userContentKey(
+      const humanFingerprint = `${biomeFingerprint}§u|${hydrologyKey}|hu:${humanSeed}|${params.namingLanguage ?? "auto"}|${userContentKey(
         document.settlements,
         document.labels,
         overrides,
@@ -205,7 +216,7 @@ export function createPipeline(): Pipeline {
         terrainHit = false;
         if (caching) terrainCache.clear();
         const t0 = nowMs();
-        terrain = generateTerrain(size, document.seed, params, overrides);
+        terrain = generateTerrain(size, terrainSeed, params, overrides);
         terrainMs = nowMs() - t0;
         if (caching) terrainCache.set(terrainKey, terrain);
       }
@@ -241,6 +252,7 @@ export function createPipeline(): Pipeline {
           channel,
           seaLevel: params.seaLevel,
           riverDensity: params.riverDensity,
+          ...(hydrologySeed === undefined ? {} : { seed: hydrologySeed }),
         });
         hydrologyMs = nowMs() - t0;
         hydrology = {
@@ -281,6 +293,7 @@ export function createPipeline(): Pipeline {
           windBands: params.windBands,
           moistureBias: params.moistureBias,
           temperatureOffset: params.temperatureOffset,
+          ...(climateSeed === undefined ? {} : { seed: climateSeed }),
         });
         climateMs = nowMs() - t0;
         if (caching) climateCache.set(climateKey, climate);
@@ -327,7 +340,7 @@ export function createPipeline(): Pipeline {
         const t0 = nowMs();
         human = generateHuman({
           size,
-          seed: document.seed,
+          seed: humanSeed,
           params,
           height,
           filled: hydrology.filled,

@@ -8,12 +8,19 @@ import {
   GRID_SIZE_OPTIONS,
   NAMING_LANGUAGE_OPTIONS,
   PARAM_GROUPS,
+  PARAM_READABILITY,
   type ParamGroupDef,
 } from "../lib/constants";
 import { countOverrides } from "../lib/documentIO";
+import {
+  countScenarioParamDiffs,
+  scenarioBaselineParams,
+  scenarioById,
+} from "../lib/scenarios";
 import { formatMs, formatPercent } from "../lib/utils";
 import { useWorldStore } from "../state/worldStore";
 import { UI_PREF_KEYS } from "../lib/uiPrefs";
+import { GenerationHistoryPanel } from "./GenerationHistoryPanel";
 import { PlacesPanel } from "./PlacesPanel";
 import {
   CollapsibleGroup,
@@ -41,6 +48,10 @@ export function ParamPanel() {
   const overrides = countOverrides(document.overrides);
   const [confirmClear, setConfirmClear] = useState(false);
   const scroll = useScrollHint();
+  const scenarioId = useWorldStore((state) => state.scenarioId);
+  const scenario = scenarioById(scenarioId);
+  const scenarioBaseline = scenarioBaselineParams(scenario);
+  const presetDiffCount = countScenarioParamDiffs(params, scenario);
 
   useEffect(() => {
     if (!confirmClear) return;
@@ -78,15 +89,41 @@ export function ParamPanel() {
           <h2>编辑面板</h2>
           <p className="panel-sub">可折叠分区 · 展开状态自动记忆</p>
         </div>
-        <button
-          type="button"
-          className="btn btn--small btn--ghost"
-          title="恢复全部默认参数"
-          data-testid="reset-all-params"
-          onClick={() => useWorldStore.getState().resetParams()}
-        >
-          全部默认
-        </button>
+        <div className="panel-head-actions">
+          {presetDiffCount > 0 ? (
+            <span
+              className="preset-badge"
+              data-testid="preset-modified-badge"
+              title={`场景「${scenario.name}」的推荐参数已被修改 ${presetDiffCount} 项`}
+            >
+              基于 {scenario.name} · 已改 {presetDiffCount} 项
+            </span>
+          ) : null}
+          <button
+            type="button"
+            className="btn btn--small"
+            title={`恢复场景「${scenario.name}」的推荐参数`}
+            data-testid="preset-reset"
+            onClick={() => {
+              useWorldStore.getState().updateParams(scenarioBaseline, {
+                history: "push",
+                sim: "now",
+              });
+              useWorldStore.getState().pushToast("info", `已还原场景「${scenario.name}」的推荐参数`);
+            }}
+          >
+            还原预设
+          </button>
+          <button
+            type="button"
+            className="btn btn--small btn--ghost"
+            title="恢复全部默认参数（不依赖场景）"
+            data-testid="reset-all-params"
+            onClick={() => useWorldStore.getState().resetParams()}
+          >
+            全部默认
+          </button>
+        </div>
       </div>
 
       <div className="panel-scroll" ref={scroll.ref} data-testid="params-scroll">
@@ -174,11 +211,37 @@ export function ParamPanel() {
                 unit={slider.unit}
                 hint={slider.hint}
                 testId={`param-${slider.key}`}
+                plain={PARAM_READABILITY[slider.key]?.plain}
+                scaleLabels={
+                  PARAM_READABILITY[slider.key]
+                    ? [
+                        PARAM_READABILITY[slider.key].low,
+                        PARAM_READABILITY[slider.key].mid,
+                        PARAM_READABILITY[slider.key].high,
+                      ]
+                    : undefined
+                }
+                recommended={
+                  typeof scenarioBaseline[slider.key] === "number"
+                    ? (scenarioBaseline[slider.key] as number)
+                    : DEFAULT_PARAM_VALUES[slider.key]
+                }
+                recommendTestId={`param-recommend-${slider.key}`}
+                onResetRecommended={() => {
+                  const recommended = scenarioBaseline[slider.key];
+                  if (typeof recommended !== "number") return;
+                  useWorldStore.getState().updateParams(
+                    { [slider.key]: recommended } as Partial<WorldParams>,
+                    { history: "push", sim: "now" },
+                  );
+                }}
                 onBegin={begin}
-                onLive={(value) =>
+                onLive={(value, interacting) =>
                   useWorldStore
                     .getState()
-                    .updateParams({ [slider.key]: value } as Partial<WorldParams>)
+                    .updateParams({ [slider.key]: value } as Partial<WorldParams>, {
+                      draft: interacting === true,
+                    })
                 }
                 onEnd={endParamInteraction}
               />
@@ -308,6 +371,15 @@ export function ParamPanel() {
             {confirmClear ? "再点一次确认清空" : "清空全部画笔编辑"}
           </button>
         </Section>
+        </CollapsibleGroup>
+
+        <CollapsibleGroup
+          title="生成历史"
+          icon="◷"
+          storageKey={UI_PREF_KEYS.leftHistory}
+          testId="group-history"
+        >
+          <GenerationHistoryPanel />
         </CollapsibleGroup>
       </div>
       <ScrollHint visible={scroll.scrollable && !scroll.atBottom} testId="params-scroll-hint">

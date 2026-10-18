@@ -38,3 +38,6 @@ jobs:
 
       - name: Render QA smoke (Node canvas)
         run: pnpm qa:render
+
+      - name: Visual regression vs baselines
+        run: pnpm qa:visual

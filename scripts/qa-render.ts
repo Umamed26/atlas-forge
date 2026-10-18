@@ -172,3 +172,18 @@ report(`large export ${LARGE_SIZE} (export, sim 2048, zlib+up-filter PNG)`, larg
 console.log(
   `\nQA render done · ${SEEDS.length} preview seeds + aged-ink + one ${LARGE_SIZE} export · renderer ${RENDERER_VERSION}`,
 );
+
+// ── appended visual regression check (skips until baselines are committed) ──
+try {
+  const { runVisualCompare } = await import("./visual-lib");
+  console.log("\nVisual regression (packages/render/test/baselines):");
+  const visual = await runVisualCompare({ missingBaseline: "skip" });
+  if (!visual.skipped && !visual.ok) {
+    console.error("visual regression FAILED — refresh baselines with `pnpm qa:visual -- --update` if intentional");
+    process.exitCode = 1;
+  }
+} catch (error) {
+  console.warn(
+    `visual regression skipped: ${error instanceof Error ? error.message : String(error)}`,
+  );
+}

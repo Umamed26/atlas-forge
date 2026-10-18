@@ -6,10 +6,14 @@ export const UI_PREF_KEYS = {
   leftWorld: `${PREFIX}left.world.open`,
   leftParams: `${PREFIX}left.params.open`,
   leftBrushes: `${PREFIX}left.brushes.open`,
+  leftHistory: `${PREFIX}left.history.open`,
   stylePreset: `${PREFIX}style.preset.open`,
   styleDetail: `${PREFIX}style.detail.open`,
   styleStats: `${PREFIX}style.stats.open`,
   exportSize: `${PREFIX}export.size`,
+  scenarioId: `${PREFIX}scenario.id`,
+  locks: `${PREFIX}locks`,
+  onboarded: `${PREFIX}onboarded`,
 } as const;
 
 export function readStoredBoolean(key: string, fallback: boolean): boolean {

@@ -13,7 +13,7 @@
  *  4. Rivers = land cells above a flow-area threshold derived from
  *     riverDensity, plus user-forced channel cells.
  */
-import { clamp, clamp01 } from "./rng";
+import { clamp, clamp01, hash2 } from "./rng";
 
 /** Fill epsilon: keeps every non-border cell strictly above its downstream. */
 export const FILL_EPSILON = 2e-6;
@@ -28,6 +28,13 @@ export interface HydrologyInput {
   channel?: Uint8Array;
   seaLevel: number;
   riverDensity: number;
+  /**
+   * Optional hydrology sub-seed. When present (stageSeeds.hydrology), the stage
+   * applies a deterministic tie-break rotation + river-threshold jitter so the
+   * river network can be re-rolled without changing the terrain. When absent
+   * the implementation is exactly the legacy one (bit-for-bit compatible).
+   */
+  seed?: number;
 }
 
 export interface HydrologyResult {
@@ -289,14 +296,42 @@ export function computeHydrology(input: HydrologyInput): HydrologyResult {
 
   // ── D8 routing on the filled surface ───────────────────────────────────
   // Ocean cells are sinks; land cells route to their steepest lower neighbour.
+  // With an optional stage seed, exact-slope tie-breaks are rotated by a
+  // deterministic offset (tie-only: slopes/coastline are unchanged).
   const downstream = new Int32Array(cells);
   downstream.fill(-1);
+  const tieOffset =
+    input.seed === undefined ? 0 : hash2(input.seed, 0x7e, 0xd8) % 8;
+  const useRotatedTies = input.seed !== undefined;
   for (let y = 1; y < size - 1; y += 1) {
     const row = y * size;
     for (let x = 1; x < size - 1; x += 1) {
       const cell = row + x;
       if (ocean[cell]) continue;
       const h = filled[cell];
+      if (useRotatedTies) {
+        // Seed mode: rotate exact-slope tie-breaks and apply a tiny (±2%)
+        // deterministic slope bias, so re-rolling the hydrology seed actually
+        // re-routes flow (still strictly downhill: every candidate drops).
+        let best = -1;
+        let bestScore = 0;
+        for (let kk = 0; kk < 8; kk += 1) {
+          const k = (kk + tieOffset) & 7;
+          const nIndex = (y + NEIGHBOR_DY[k]) * size + (x + NEIGHBOR_DX[k]);
+          const drop = h - filled[nIndex];
+          if (drop <= 0) continue;
+          const slope = drop / (k < 4 ? 1 : Math.SQRT2);
+          const bias =
+            1 + (hash2(input.seed as number, cell, k * 0x9e37 + 17) / 4294967296 - 0.5) * 0.04;
+          const score = slope * bias;
+          if (score > bestScore) {
+            bestScore = score;
+            best = nIndex;
+          }
+        }
+        downstream[cell] = best;
+        continue;
+      }
       let best = -1;
       let bestSlope = 0;
       let drop = h - filled[cell - 1];
@@ -367,10 +402,28 @@ export function computeHydrology(input: HydrologyInput): HydrologyResult {
 
   // ── Rivers ─────────────────────────────────────────────────────────────
   const density = clamp01(input.riverDensity);
-  const threshold = Math.max(
+  const baseThreshold = Math.max(
     4,
     Math.round(cells * 6e-5 * Math.exp((0.5 - density) * 2.0)),
   );
+  // Optional stage seed: jitter the flow-area threshold so re-rolling the
+  // hydrology seed visibly changes the river network (no legacy effect).
+  let threshold = baseThreshold;
+  if (input.seed !== undefined) {
+    const seedHash = hash2(input.seed, 0, 0x5eed);
+    threshold = Math.max(
+      2,
+      Math.round(baseThreshold * (0.75 + 0.5 * (seedHash / 4294967296))),
+    );
+    if (threshold === baseThreshold) {
+      // Guarantee a change even on tiny grids where rounding/flooring would
+      // otherwise collapse the jitter (e.g. baseThreshold = 4).
+      threshold = baseThreshold >= 3
+        ? (seedHash & 1) === 0 ? baseThreshold + 1 : baseThreshold - 1
+        : baseThreshold + 1;
+      if (threshold < 2) threshold = baseThreshold + 1;
+    }
+  }
   const river = new Uint8Array(cells);
   for (let i = 0; i < cells; i += 1) {
     if (ocean[i] || lake[i]) continue;

@@ -7,12 +7,30 @@
  */
 import type { ProgressUpdate, WorldDocument, WorldLayers } from "@atlas/core";
 
+export interface GenerationRequestOptions {
+  /** Simulate at this grid size (512² drafts / quick mode). */
+  size?: number;
+  /** Draft previews are rendered but never replace the document layers. */
+  draft?: boolean;
+}
+
+export interface GenerationLayersMeta {
+  draft: boolean;
+  size: number | null;
+}
+
 export interface GenerationClientHandlers {
-  onDispatch(seq: number, document: WorldDocument): void;
+  onDispatch(seq: number, document: WorldDocument, options: GenerationRequestOptions): void;
   onQueued(seq: number, document: WorldDocument): void;
   onProgress(seq: number, update: ProgressUpdate): void;
-  onLayers(seq: number, layers: WorldLayers, document: WorldDocument): void;
+  onLayers(
+    seq: number,
+    layers: WorldLayers,
+    document: WorldDocument,
+    meta: GenerationLayersMeta,
+  ): void;
   onError(seq: number, message: string): void;
+  onCancelled(seq: number): void;
 }
 
 interface WorkerLayersMessage {
@@ -39,6 +57,7 @@ type WorkerReply = WorkerLayersMessage | WorkerProgressMessage | WorkerErrorMess
 interface Job {
   seq: number;
   document: WorldDocument;
+  options: GenerationRequestOptions;
 }
 
 export class GenerationClient {
@@ -49,6 +68,7 @@ export class GenerationClient {
   private busy = false;
   private pending: Job | null = null;
   private currentDocument: WorldDocument | null = null;
+  private currentOptions: GenerationRequestOptions | null = null;
 
   constructor(handlers: GenerationClientHandlers) {
     this.handlers = handlers;
@@ -70,9 +90,10 @@ export class GenerationClient {
   }
 
   /** Submit a document. Returns the sequence id associated with this request. */
-  request(document: WorldDocument): number {
+  request(document: WorldDocument, options: GenerationRequestOptions = {}): number {
     this.seqCounter += 1;
-    const job: Job = { seq: this.seqCounter, document };
+    const job: Job = { seq: this.seqCounter, document, options };
+    if (!this.worker) this.start();
     if (!this.worker) {
       this.handlers.onError(job.seq, "生成 worker 尚未启动");
       return job.seq;
@@ -110,14 +131,39 @@ export class GenerationClient {
     this.busy = true;
     this.inFlightSeq = job.seq;
     this.currentDocument = job.document;
-    this.handlers.onDispatch(job.seq, job.document);
-    this.worker?.postMessage({ type: "generate", seq: job.seq, document: job.document });
+    this.currentOptions = job.options;
+    this.handlers.onDispatch(job.seq, job.document, job.options);
+    this.worker?.postMessage({
+      type: "generate",
+      seq: job.seq,
+      document: job.document,
+      ...(typeof job.options.size === "number" ? { size: job.options.size } : {}),
+    });
   }
 
   private finish(): void {
     this.busy = false;
     this.inFlightSeq = 0;
     this.currentDocument = null;
+    this.currentOptions = null;
+  }
+
+  /** Hard-cancel the running job by terminating and recreating the worker. */
+  cancel(): void {
+    const seq = this.inFlightSeq;
+    const wasBusy = this.busy;
+    this.busy = false;
+    this.inFlightSeq = 0;
+    this.currentDocument = null;
+    this.currentOptions = null;
+    this.pending = null;
+    if (this.worker) {
+      this.worker.onmessage = null;
+      this.worker.onerror = null;
+      this.worker.terminate();
+      this.worker = null;
+    }
+    if (wasBusy) this.handlers.onCancelled(seq);
   }
 
   private pumpPending(): void {
@@ -136,9 +182,12 @@ export class GenerationClient {
     }
     if (message.type === "layers") {
       if (message.seq !== this.inFlightSeq) return;
+      const options = this.currentOptions;
       this.finish();
-      this.handlers.onLayers(message.seq, message.layers, message.document);
-      this.pumpPending();
+      this.handlers.onLayers(message.seq, message.layers, message.document, {
+        draft: options?.draft === true,
+        size: typeof options?.size === "number" ? options.size : null,
+      });
       return;
     }
     if (message.type === "error") {

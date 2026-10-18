@@ -17,19 +17,14 @@ import type { Ctx2D } from "./canvas-types";
 import { buildCoastData, drawCoastline, drawLakes, drawSea } from "./coast";
 import { planDecorations } from "./decor";
 import { extractRivers, drawRivers, type RiverPath } from "./hydro";
-import {
-  drawLabels,
-  layoutMapLabels,
-  type LabelStats,
-  type MeasuredLabel,
-} from "./labels";
+import { drawLabels, type LabelStats } from "./labels";
 import { drawMountainGlyphs } from "./mountains";
 import { drawForestGlyphs } from "./forests";
 import { buildTerrainField, getPaperTexture, rasterizeParchment } from "./raster";
 import { resolveTheme, type Quality } from "./style";
 import type { RenderPass } from "./pass";
 
-export const RENDERER_VERSION = "1.1.0";
+export const RENDERER_VERSION = "1.3.0";
 
 export interface RenderWorldInput {
   ctx: Ctx2D;
@@ -247,73 +242,21 @@ export function renderWorld(input: RenderWorldInput): RenderStats {
   }
 }
 
-/**
- * Hit-testing / layout API (additive, v1.1.0).
- *
- * Returns the exact image-space boxes of the labels and settlement markers that
- * `renderWorld` would paint for the same document / layers / size, using the
- * same layout pass. Hidden or collision-skipped entries are omitted.
- *
- * Pure with respect to the document: only `ctx` is queried for `measureText`,
- * and its state is restored before returning.
- */
-export interface MeasureMapContentInput {
-  ctx: Ctx2D;
-  document: WorldDocument;
-  layers: WorldLayers;
-  width: number;
-  height: number;
-  /** Defaults to export when the shorter edge is >= 2048, preview otherwise. */
-  quality?: Quality;
-}
+// ── v1.1.0: hit-testing layout API ───────────────────────────────────────
+export { measureMapContent, measureMapContentDetailed } from "./measure";
+export type { MeasureMapContentInput, MapContentMeasurement } from "./measure";
 
-export function measureMapContent(input: MeasureMapContentInput): MeasuredLabel[] {
-  const { ctx, document, layers, width, height } = input;
-  if (!Number.isFinite(width) || !Number.isFinite(height) || width < 1 || height < 1) {
-    throw new Error(`invalid measure size ${width}x${height}`);
-  }
-  const quality: Quality =
-    input.quality ?? (Math.min(width, height) >= 2048 ? "export" : "preview");
-  const theme = resolveTheme(document.style, quality);
-  const size = Math.min(width, height);
-  const scale = size / 1024;
-  const seed = (document.seed | 0) || 1;
-  const seaLevel = Math.min(0.95, Math.max(0.05, document.params.seaLevel));
-  const pass: RenderPass = {
-    ctx,
-    width,
-    height,
-    size,
-    scale,
-    theme,
-    seed,
-    quality,
-    document,
-    layers,
-    seaLevel,
-  };
-  // Decorations reserve the same avoid rects as renderWorld (cartouche, compass,
-  // legend, scale bar) so measured boxes match the painted result.
-  const avoid = planDecorations(pass).avoid;
-  ctx.save();
-  try {
-    return layoutMapLabels(ctx, {
-      width,
-      height,
-      scale,
-      theme,
-      seed,
-      quality,
-      document,
-      layers,
-      avoid,
-    }).measured;
-  } finally {
-    ctx.restore();
-  }
-}
-
-export type { MeasuredLabel } from "./labels";
+// ── v1.2.0: non-blocking readability assessment ──────────────────────────
+export { assessMapReadability } from "./readability";
+export type {
+  AssessMapReadabilityInput,
+  ReadabilityFix,
+  ReadabilityIssue,
+  ReadabilityIssueId,
+  ReadabilityMetrics,
+  ReadabilityReport,
+  ReadabilitySeverity,
+} from "./readability";
 
 export { resolveTheme } from "./style";
 export type { Quality, RenderTheme } from "./style";

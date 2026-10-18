@@ -209,6 +209,19 @@ async function main() {
 
   await page.goto(WEB_URL, { waitUntil: "domcontentloaded", timeout: 60_000 });
   await page.waitForSelector('[data-testid="map-canvas"]', { timeout: 30_000 });
+
+  // v0.4 first-run onboarding: a fresh profile shows the scenario picker. The
+  // generic flows below start from the classic world, so skip the picker.
+  await page.waitForSelector('[data-testid="welcome"]', { timeout: 8_000 }).catch(() => {});
+  if (await page.locator('[data-testid="welcome"]').isVisible().catch(() => false)) {
+    const skip = page.locator('[data-testid="welcome-skip"]');
+    if (await skip.count()) {
+      await skip.click();
+      notes.push("dismissed first-run welcome with skip");
+    }
+    await sleep(400);
+  }
+
   await page
     .waitForFunction(() => globalThis.__atlasDebug?.getSummary?.()?.layers != null, { timeout: 60_000 })
     .catch(() => notes.push("layers did not become ready in time"));

@@ -132,8 +132,16 @@ export interface SliderFieldProps {
   disabled?: boolean;
   testId?: string;
   format?: (value: number) => string;
+  /** Plain-language result copy (P1-1). */
+  plain?: string;
+  /** Semantic low / mid / high labels shown under the track. */
+  scaleLabels?: [string, string, string];
+  /** Recommended value from the current scenario preset. */
+  recommended?: number | null;
+  recommendTestId?: string;
+  onResetRecommended?: () => void;
   onBegin: () => void;
-  onLive: (value: number) => void;
+  onLive: (value: number, interacting?: boolean) => void;
   onEnd: (changed: boolean) => void;
 }
 
@@ -149,6 +157,11 @@ export function SliderField({
   disabled,
   testId,
   format,
+  plain,
+  scaleLabels,
+  recommended,
+  recommendTestId,
+  onResetRecommended,
   onBegin,
   onLive,
   onEnd,
@@ -204,10 +217,39 @@ export function SliderField({
         onBlur={finish}
         onChange={(event) => {
           changedRef.current = true;
-          onLive(Number(event.target.value));
+          onLive(Number(event.target.value), activeRef.current);
         }}
       />
       {hint ? <p className="field-hint">{hint}</p> : null}
+      {plain ? <p className="field-plain">{plain}</p> : null}
+      {scaleLabels ? (
+        <div className="slider-scale" aria-hidden="true">
+          <span>{scaleLabels[0]}</span>
+          <span>{scaleLabels[1]}</span>
+          <span>{scaleLabels[2]}</span>
+        </div>
+      ) : null}
+      {recommended !== null && recommended !== undefined ? (
+        <div className="slider-recommend">
+          <div className="recommend-track" aria-hidden="true">
+            <span
+              className="recommend-tick"
+              style={{
+                left: `${Math.min(100, Math.max(0, ((recommended - min) / Math.max(1e-6, max - min)) * 100))}%`,
+              }}
+            />
+          </div>
+          <button
+            type="button"
+            className="link-button"
+            data-testid={recommendTestId}
+            title={`恢复场景推荐值 ${format ? format(recommended) : recommended.toFixed(decimals)}`}
+            onClick={onResetRecommended}
+          >
+            恢复推荐
+          </button>
+        </div>
+      ) : null}
     </div>
   );
 }

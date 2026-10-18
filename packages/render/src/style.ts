@@ -79,6 +79,10 @@ export interface RenderTheme {
 
   /** Per-biome wash tint (indexed by BiomeId). */
   biomeTints: RGB[];
+  /**
+   * Albedo tint weight. Can be overridden per render via the additive
+   * `RenderStyle.biomeTint` field (read structurally until core adds it).
+   */
   biomeMix: number;
 
   hillshade: {
@@ -184,21 +188,21 @@ const AGED_OCEAN_SHELF: RGB = [212, 205, 179];
  * greens for forests, dusty yellow for grass/desert, bluish-grey for ice.
  */
 const BIOME_TINTS_COMMON: RGB[] = [
-  [150, 165, 158], // Ocean (unused on land)
-  [150, 172, 168], // Lake (unused on land)
-  [198, 214, 219], // Ice
-  [168, 176, 164], // Tundra
-  [90, 110, 84], // BorealForest
-  [106, 124, 84], // TemperateForest
-  [198, 184, 120], // Grassland
-  [172, 158, 106], // Shrubland
-  [203, 176, 110], // Savanna
-  [228, 204, 150], // Desert
-  [78, 112, 72], // TropicalForest
-  [120, 140, 108], // Wetland
-  [222, 208, 166], // Beach
-  [152, 134, 112], // Mountain
-  [238, 235, 228], // SnowPeak
+  [120, 140, 150], // Ocean (unused on land)
+  [128, 152, 158], // Lake (unused on land)
+  [174, 214, 240], // Ice — cold pale blue, forms visible ice sheets at 256px
+  [140, 162, 150], // Tundra — cold grey-green lichen
+  [62, 104, 88], // BorealForest — cool dark green
+  [80, 120, 94], // TemperateForest — cool mid green
+  [206, 190, 116], // Grassland — warm yellow
+  [166, 152, 104], // Shrubland
+  [186, 152, 76], // Savanna — golden, darker than desert
+  [242, 220, 164], // Desert — light warm sand (no green)
+  [38, 86, 54], // TropicalForest — deep green
+  [102, 134, 110], // Wetland
+  [224, 208, 160], // Beach
+  [150, 134, 112], // Mountain
+  [248, 250, 252], // SnowPeak — near white
 ];
 
 function tint(colors: RGB[], biome: number, color: RGB): RGB[] {
@@ -209,18 +213,19 @@ function tint(colors: RGB[], biome: number, color: RGB): RGB[] {
 function biomeTints(preset: RenderStyle["preset"]): RGB[] {
   const colors = BIOME_TINTS_COMMON.map((c): RGB => [c[0], c[1], c[2]]);
   if (preset === "aged-ink") {
-    return tint(colors, 4, [92, 108, 88])
-      .slice(0)
-      .map((c, i): RGB => {
-        // Aged maps are browner: desaturate and warm every tint.
-        if (i === 0 || i === 1) return c;
-        const warm = 0.18;
-        return [
-          Math.round(c[0] * (1 - warm) + 150 * warm),
-          Math.round(c[1] * (1 - warm) + 128 * warm),
-          Math.round(c[2] * (1 - warm) + 92 * warm),
-        ];
-      });
+    return colors.map((c, i): RGB => {
+      // Aged maps are slightly browner, but hue differences (ice vs desert vs
+      // forest) must survive at thumbnail size.
+      if (i === 0 || i === 1) return c;
+      const warm = 0.07;
+      const desat = 0.12;
+      const luma = c[0] * 0.3 + c[1] * 0.59 + c[2] * 0.11;
+      return [
+        Math.round((c[0] + (luma - c[0]) * desat) * (1 - warm) + 150 * warm),
+        Math.round((c[1] + (luma - c[1]) * desat) * (1 - warm) + 128 * warm),
+        Math.round((c[2] + (luma - c[2]) * desat) * (1 - warm) + 92 * warm),
+      ];
+    });
   }
   return colors;
 }
@@ -270,11 +275,11 @@ function parchmentClassic(style: RenderStyle, quality: Quality): RenderTheme {
       high: [174, 149, 114],
       rock: [144, 121, 96],
       peak: [236, 229, 215],
-      cold: [207, 214, 212],
+      cold: [198, 208, 212],
       relief: [200, 181, 152],
     },
     biomeTints: biomeTints("parchment-classic"),
-    biomeMix: 0.5,
+    biomeMix: 0.55,
     hillshade: {
       strength: style.hillshadeStrength,
       exaggeration: 330,
@@ -374,7 +379,7 @@ function agedInk(style: RenderStyle, quality: Quality): RenderTheme {
       high: [147, 121, 89],
       rock: [115, 95, 73],
       peak: [218, 207, 185],
-      cold: [186, 193, 190],
+      cold: [186, 196, 202],
       relief: [166, 142, 111],
     },
     biomeMix: 0.5,
@@ -426,8 +431,10 @@ export function resolveTheme(style: RenderStyle, quality: Quality): RenderTheme 
   const base = style.preset === "aged-ink" ? agedInk(style, quality) : parchmentClassic(style, quality);
   const styleFactor = 0.55 + 0.9 * clamp01(style.paperTexture);
   const coastFactor = 0.4 + 1.0 * clamp01(style.coastHatching);
+  const styleBiomeTint = readBiomeTint(style);
   return {
     ...base,
+    biomeMix: styleBiomeTint ?? base.biomeMix,
     paper: {
       ...base.paper,
       grain: base.paper.grain * styleFactor,
@@ -445,6 +452,13 @@ export function resolveTheme(style: RenderStyle, quality: Quality): RenderTheme 
     },
     hillshade: { ...base.hillshade, strength: clamp01(style.hillshadeStrength) },
   };
+}
+
+/** Optional additive style control: 0..1 biome wash weight. */
+function readBiomeTint(style: RenderStyle): number | undefined {
+  const raw = (style as RenderStyle & { biomeTint?: unknown }).biomeTint;
+  if (typeof raw !== "number" || !Number.isFinite(raw)) return undefined;
+  return clamp01(raw);
 }
 
 function clamp01(value: number): number {

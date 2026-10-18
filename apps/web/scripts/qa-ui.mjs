@@ -169,6 +169,10 @@ async function main() {
     const url = request.url();
     const errorText = request.failure()?.errorText ?? "";
     if (url.includes("favicon")) return;
+    if (url.includes("/api/health")) {
+      notes.push(`env: health probe request failed (${errorText})`);
+      return;
+    }
     // Cancelling a running export intentionally aborts its fetch; that is a
     // product feature, not a failed request.
     if (url.includes("/api/render") && errorText.includes("ERR_ABORTED")) {
@@ -184,7 +188,10 @@ async function main() {
   await page.waitForSelector('[data-testid="map-canvas"]', { timeout: 30_000 });
   await page.waitForFunction(() => Boolean(window.__atlasDebug), undefined, { timeout: 20_000 });
   // Deterministic start: drop any autosave left by earlier manual runs.
-  await page.evaluate(() => localStorage.clear());
+  await page.evaluate(() => {
+    localStorage.clear();
+    localStorage.setItem("atlas_forge.ui.onboarded", "1");
+  });
   await page.reload({ waitUntil: "domcontentloaded" });
   await page.waitForSelector('[data-testid="map-canvas"]', { timeout: 30_000 });
   await page.waitForFunction(() => Boolean(window.__atlasDebug), undefined, { timeout: 20_000 });
@@ -211,6 +218,16 @@ async function main() {
       "group-places",
       "group-params",
       "group-brushes",
+      "group-history",
+      "preset-open",
+      "generated-summary",
+      "next-reroll",
+      "next-tweak",
+      "next-export",
+      "lock-coast",
+      "lock-style",
+      "reroll-locked",
+      "reroll-names",
       "undo",
       "redo",
       "export-png",
@@ -1744,6 +1761,7 @@ async function main() {
     try {
       localStorage.setItem("atlas_forge.world.v1", "{corrupted-json");
       localStorage.setItem("atlas_forge.world.backup.v1", payload);
+      localStorage.setItem("atlas_forge.ui.onboarded", "1");
     } catch {
       // ignore
     }
@@ -1811,6 +1829,505 @@ async function main() {
   check("shortcut F fits the map", (await summary(page)).view.scale > 0);
   check("undo stack still healthy", (await summary(page)).history.undo > 0, `elevation stamps=${undoBeforeShortcut}`);
 
+
+
+  // ── 18. v0.4 generation experience ─────────────────────────────────
+  log("v0.4 generation experience");
+  await waitIdle(page);
+  const v4base = await summary(page);
+  check(
+    "scenario metadata is exposed in the debug summary",
+    typeof v4base.scenarioId === "string" &&
+      v4base.scenarioName.length > 0 &&
+      v4base.locks !== null,
+    `scenario=${v4base.scenarioId} locks=${JSON.stringify(v4base.locks)}`,
+  );
+  check(
+    "generated summary names the scenario and seed suffix",
+    /已生成：.+ · #\d{4}/.test(
+      await page.locator('[data-testid="generated-summary"]').innerText(),
+    ),
+    await page.locator('[data-testid="generated-summary"]').innerText(),
+  );
+  check(
+    "five stage locks are present and default unlocked",
+    (await page.locator('[data-testid="lock-coast"]').getAttribute("aria-pressed")) === "false" &&
+      (await page.locator('[data-testid="lock-style"]').getAttribute("aria-pressed")) === "false",
+  );
+
+  // lock the coast, reroll three times: terrain must stay identical
+  const presetBadgeBeforeLocks = await page.locator('[data-testid="preset-modified-badge"]').count();
+  await page.locator('[data-testid="lock-coast"]').click();
+  const lockedBase = await summary(page);
+  const lockedHeights = [];
+  const lockedOceans = [];
+  const lockedRivers = [];
+  const lockedLand = [];
+  for (let index = 0; index < 3; index += 1) {
+    await page.locator('[data-testid="reroll-locked"]').click();
+    await sleep(260);
+    await waitIdle(page);
+    const state = await summary(page);
+    const signature = await page.evaluate(() => window.__atlasDebug.getLayerSignature());
+    lockedHeights.push(signature.height);
+    lockedOceans.push(signature.ocean);
+    lockedRivers.push(signature.river);
+    lockedLand.push(state.layers.landFraction);
+  }
+  check(
+    "locking the coastline keeps height/ocean hashes identical across 3 rerolls",
+    lockedHeights.every((value) => value === lockedHeights[0]) &&
+      lockedOceans.every((value) => value === lockedOceans[0]),
+    JSON.stringify({ lockedHeights, lockedOceans }),
+  );
+  check(
+    "rerolling unlocked stages actually changes the river hash at least once",
+    lockedRivers.some((value) => value !== lockedRivers[0]),
+    JSON.stringify(lockedRivers),
+  );
+  check(
+    "locked-coast rerolls keep landFraction identical",
+    lockedLand.every((value) => value === lockedLand[0]),
+    JSON.stringify(lockedLand),
+  );
+  const lockedStageSeeds = await page.evaluate(() => window.__atlasDebug.getStageSeeds());
+  check(
+    "explicit stage seeds are stored and terrain stays unseeded while locked",
+    lockedStageSeeds !== null &&
+      typeof lockedStageSeeds.hydrology === "number" &&
+      typeof lockedStageSeeds.human === "number" &&
+      lockedStageSeeds.terrain === undefined,
+    JSON.stringify(lockedStageSeeds),
+  );
+  check(
+    "stage seeds do not count as preset parameter modifications",
+    (await page.locator('[data-testid="preset-modified-badge"]').count()) ===
+      presetBadgeBeforeLocks,
+    `badge ${presetBadgeBeforeLocks} -> ${
+      await page.locator('[data-testid="preset-modified-badge"]').count()
+    }`,
+  );
+  const lockToast = await page.locator('[data-testid="toast"]').last().innerText();
+  check(
+    "reroll toast explains which stages were kept",
+    lockToast.includes("已换：") &&
+      lockToast.includes(" · 保留：") &&
+      lockToast.includes("海岸"),
+    lockToast.replace(/\n/g, " | ").slice(0, 160),
+  );
+  await screenshot(page, "22-locks.png");
+
+  // unlock coast: reroll must now change the terrain, exactly one history entry
+  await page.locator('[data-testid="lock-coast"]').click();
+  const beforeUnlocked = await summary(page);
+  await page.locator('[data-testid="next-reroll"]').click();
+  await sleep(260);
+  await waitIdle(page);
+  const afterUnlocked = await summary(page);
+  check(
+    "unlocked reroll changes the terrain signature",
+    afterUnlocked.layerSignature.height !== beforeUnlocked.layerSignature.height,
+    `${beforeUnlocked.layerSignature.height} -> ${afterUnlocked.layerSignature.height}`,
+  );
+  check(
+    "reroll adds exactly one history entry",
+    afterUnlocked.history.undo === beforeUnlocked.history.undo + 1,
+    `${beforeUnlocked.history.undo} -> ${afterUnlocked.history.undo}`,
+  );
+  check(
+    "reroll changes some stage seed (document stageSeeds present)",
+    (await page.evaluate(() => Boolean(window.__atlasDebug.getDocument().params.stageSeeds))) === true,
+  );
+
+  // next actions
+  await page.locator('[data-testid="next-tweak"]').click();
+  await sleep(300);
+  check(
+    "tweak expands the parameter group and focuses the first slider",
+    (await page.locator('[data-testid="group-params"] .panel-group-body').count()) === 1 &&
+      (await page.evaluate(() => document.activeElement?.getAttribute("data-testid"))) ===
+        "param-seaLevel",
+  );
+  await page.locator('[data-testid="next-export"]').click();
+  await page.waitForSelector('[data-testid="export-dialog"]');
+  check("next-export opens the export dialog", true);
+  await page.keyboard.press("Escape");
+  await sleep(150);
+
+  // preset badge + recommend + reset
+  const setSliderValue = async (testId, value) => {
+    await page.locator(`[data-testid="${testId}"]`).evaluate((element, nextValue) => {
+      element.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, pointerId: 1, button: 0 }));
+      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value").set;
+      setter.call(element, String(nextValue));
+      element.dispatchEvent(new Event("input", { bubbles: true }));
+    }, value);
+    await sleep(260);
+    await page.locator(`[data-testid="${testId}"]`).evaluate((element) => {
+      element.dispatchEvent(new PointerEvent("pointerup", { bubbles: true, pointerId: 1, button: 0 }));
+    });
+    await waitIdle(page);
+  };
+  await setSliderValue("param-seaLevel", 0.48);
+  const badgeText = await page
+    .locator('[data-testid="preset-modified-badge"]')
+    .innerText()
+    .catch(() => "");
+  check(
+    "parameter group header shows the modified-preset badge",
+    /基于 .+ · 已改 \d+ 项/.test(badgeText),
+    badgeText,
+  );
+  await screenshot(page, "26-preset-badge.png");
+  await page.locator('[data-testid="param-recommend-seaLevel"]').click();
+  await waitIdle(page);
+  const seaLevelAfterRecommend = await page.evaluate(
+    () => window.__atlasDebug.getDocument().params.seaLevel,
+  );
+  check(
+    "restore-recommended returns the slider to the scenario baseline",
+    Math.abs(seaLevelAfterRecommend - 0.42) < 1e-9,
+    String(seaLevelAfterRecommend),
+  );
+  await setSliderValue("param-riverDensity", 0.72);
+  await page.locator('[data-testid="preset-reset"]').click();
+  await waitIdle(page);
+  const resetParams = await page.evaluate(() => window.__atlasDebug.getDocument().params);
+  check(
+    "one-click preset reset restores the preset parameter baseline",
+    Math.abs(resetParams.seaLevel - 0.42) < 1e-9 &&
+      Math.abs(resetParams.riverDensity - 0.5) < 1e-9,
+    JSON.stringify({ seaLevel: resetParams.seaLevel, riverDensity: resetParams.riverDensity }),
+  );
+  check(
+    "preset badge disappears after restoring the baseline",
+    (await page.locator('[data-testid="preset-modified-badge"]').count()) === 0,
+  );
+
+  // generation history: thumbnails, restore + reverse, one undo entry
+  const historyBefore = await page.evaluate(() => window.__atlasDebug.getGenerationHistory());
+  check(
+    "recent generation history keeps thumbnails + metadata",
+    historyBefore.length >= 2 &&
+      historyBefore.every((entry) => entry.thumbnail.startsWith("data:image/png")),
+    `entries=${historyBefore.length}`,
+  );
+  check(
+    "generation history is capped at 10",
+    historyBefore.length <= 10,
+    String(historyBefore.length),
+  );
+  const undoBeforeRestore = (await summary(page)).history.undo;
+  const seedOfTarget = historyBefore[0].seed;
+  await page.locator('[data-testid="gen-history-restore-0"]').click();
+  await waitIdle(page);
+  const restoredState = await summary(page);
+  check(
+    "restoring a history entry generates that world again",
+    (await page.evaluate(() => window.__atlasDebug.getDocument().seed)) === seedOfTarget,
+    `seed=${seedOfTarget}`,
+  );
+  check(
+    "restoring history adds exactly one undo entry",
+    restoredState.history.undo === undoBeforeRestore + 1,
+    `${undoBeforeRestore} -> ${restoredState.history.undo}`,
+  );
+  check(
+    "restoring history also keeps the current world recoverable",
+    (await page.evaluate(() => window.__atlasDebug.getGenerationHistory())).length >=
+      historyBefore.length,
+  );
+  await screenshot(page, "23-history.png");
+
+  // draft preview while dragging a slider
+  const riverSlider = page.locator('[data-testid="param-riverDensity"]');
+  await riverSlider.evaluate((element) => {
+    element.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, pointerId: 1, button: 0 }));
+    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value").set;
+    for (const value of [0.35, 0.42, 0.48]) {
+      setter.call(element, String(value));
+      element.dispatchEvent(new Event("input", { bubbles: true }));
+    }
+  });
+  await page.waitForSelector('[data-testid="gen-draft-badge"]', { timeout: 15_000 });
+  check("dragging a slider shows the 512² draft badge", true);
+  await screenshot(page, "24-draft.png");
+  const draftState = await summary(page);
+  check(
+    "draft preview is flagged while the full generation is pending",
+    draftState.draftActive === true || draftState.generationKind === "draft",
+    `draftActive=${draftState.draftActive} kind=${draftState.generationKind}`,
+  );
+  await riverSlider.evaluate((element) => {
+    element.dispatchEvent(new PointerEvent("pointerup", { bubbles: true, pointerId: 1, button: 0 }));
+  });
+  await waitIdle(page);
+  check(
+    "releasing the slider removes the draft badge",
+    (await page.locator('[data-testid="gen-draft-badge"]').count()) === 0,
+  );
+
+  // continuous real-mouse drag: draft requests are throttled (not debounced)
+  await page.bringToFront();
+  if (
+    (await page
+      .locator('[data-testid="group-params"] .panel-group-head')
+      .getAttribute("aria-expanded")) === "false"
+  ) {
+    await page.locator('[data-testid="group-params"] .panel-group-head').click();
+    await sleep(200);
+  }
+  await page.locator('[data-testid="param-seaLevel"]').scrollIntoViewIfNeeded();
+  await sleep(250);
+  const dragStartState = await summary(page);
+  const dragSliderBox = await page.locator('[data-testid="param-seaLevel"]').boundingBox();
+  const dragHistoryBefore = dragStartState.historyCount;
+  const dragUndoBefore = dragStartState.history.undo;
+  const dragStartX = dragSliderBox.x + dragSliderBox.width * 0.2;
+  const dragY = dragSliderBox.y + dragSliderBox.height / 2;
+  await page.mouse.move(dragStartX, dragY);
+  await page.mouse.down();
+  const dragStartedAt = Date.now();
+  let sawDraftBadgeDuringDrag = false;
+  const dragKinds = [];
+  for (let step = 1; step <= 12; step += 1) {
+    const fraction = 0.2 + 0.6 * (step / 12);
+    await page.mouse.move(dragSliderBox.x + dragSliderBox.width * fraction, dragY, {
+      steps: 2,
+    });
+    await sleep(75);
+    if ((await page.locator('[data-testid="gen-draft-badge"]').count()) > 0) {
+      sawDraftBadgeDuringDrag = true;
+    }
+    dragKinds.push((await summary(page)).generationKind);
+  }
+  const dragElapsedMs = Date.now() - dragStartedAt;
+  const duringDrag = await summary(page);
+  const draftRequestsDuringDrag = duringDrag.draftRequests - dragStartState.draftRequests;
+  check(
+    "continuous slider drag fires throttled draft requests (>= 2 in ~1s)",
+    draftRequestsDuringDrag >= 2,
+    `requests=${draftRequestsDuringDrag} kinds=${JSON.stringify(dragKinds)}`,
+  );
+  const throttleLimit = Math.ceil(dragElapsedMs / 150) + 2;
+  check(
+    "draft requests are throttled by elapsed time, not fired per pointer move",
+    draftRequestsDuringDrag <= throttleLimit && draftRequestsDuringDrag < 12 * 4,
+    `requests=${draftRequestsDuringDrag} over ${dragElapsedMs}ms (limit ${throttleLimit})`,
+  );
+  check(
+    "draft badge becomes visible while the slider is still held",
+    sawDraftBadgeDuringDrag || duringDrag.draftActive === true,
+    `saw=${sawDraftBadgeDuringDrag} active=${duringDrag.draftActive}`,
+  );
+  check(
+    "draft previews add no generation-history entries and at most one action snapshot",
+    duringDrag.generationHistoryCount === dragHistoryBefore &&
+      duringDrag.history.undo - dragUndoBefore <= 1,
+    `undo ${dragUndoBefore} -> ${duringDrag.history.undo}, short-history ${dragHistoryBefore} -> ${duringDrag.generationHistoryCount}`,
+  );
+  await page.mouse.up();
+  const fullSeqBefore = duringDrag.generation.seq;
+  await page.waitForFunction(
+    () => {
+      const state = window.__atlasDebug.getSummary();
+      return (
+        state.draftActive === false &&
+        state.generation.phase === "idle" &&
+        state.generationKind === "full"
+      );
+    },
+    undefined,
+    { timeout: 45_000, polling: 100 },
+  );
+  const afterDrag = await summary(page);
+  check(
+    "releasing the slider clears the draft badge and runs a full generation",
+    afterDrag.draftActive === false &&
+      afterDrag.generationKind === "full" &&
+      afterDrag.generation.seq > fullSeqBefore,
+    `seq ${fullSeqBefore} -> ${afterDrag.generation.seq}`,
+  );
+  check(
+    "the drag commits exactly one undo entry",
+    afterDrag.history.undo === dragUndoBefore + 1,
+    `${dragUndoBefore} -> ${afterDrag.history.undo}`,
+  );
+  await waitIdle(page);
+
+  // cancel generation, old map stays, then regenerate
+  const beforeCancel = await summary(page);
+  await page.locator('[data-testid="next-reroll"]').click();
+  await page.waitForSelector('[data-testid="gen-cancel"]', { timeout: 8_000 });
+  await page.locator('[data-testid="gen-cancel"]').click();
+  await page.waitForFunction(
+    () => window.__atlasDebug.getSummary().generation.phase === "idle",
+    undefined,
+    { timeout: 10_000, polling: 100 },
+  );
+  const afterCancel = await summary(page);
+  check(
+    "cancelling generation keeps the previous map",
+    afterCancel.layers !== null &&
+      afterCancel.layerSignature.height === beforeCancel.layerSignature.height,
+  );
+  check(
+    "cancel toast explains the previous map was kept",
+    (await page.locator('[data-testid="toast"]').last().innerText()).includes("已取消"),
+  );
+  await page.locator('[data-testid="next-reroll"]').click();
+  await sleep(250);
+  await waitIdle(page);
+  check("generation can be started again after cancel", (await summary(page)).layers !== null);
+
+  // quick mode: 512² preview without touching params.gridSize
+  const fullSizeSeed = await page.evaluate(() => window.__atlasDebug.getDocument().params.gridSize);
+  await page.evaluate(() => window.__atlasDebug.quickGenerate());
+  await waitIdle(page);
+  const quickState = await summary(page);
+  check(
+    "quick mode regenerates a 512² preview",
+    quickState.layers.size === 512 &&
+      (await page.evaluate(() => window.__atlasDebug.getDocument().params.gridSize)) === fullSizeSeed,
+    `layers=${quickState.layers.size} grid=${fullSizeSeed}`,
+  );
+  await page.locator('[data-testid="next-reroll"]').click();
+  await sleep(250);
+  await waitIdle(page);
+  check("full-size generation restores 1024² layers", (await summary(page)).layers.size === 1024);
+
+  // reroll names only
+  const beforeNames = await summary(page);
+  const undoBeforeNames = beforeNames.history.undo;
+  await page.locator('[data-testid="reroll-names"]').click();
+  await sleep(260);
+  await waitIdle(page);
+  const afterNames = await summary(page);
+  check(
+    "name reroll keeps terrain, rivers and biomes untouched",
+    afterNames.layerSignature.height === beforeNames.layerSignature.height &&
+      afterNames.layerSignature.river === beforeNames.layerSignature.river &&
+      afterNames.layerSignature.biome === beforeNames.layerSignature.biome,
+    JSON.stringify({ before: beforeNames.layerSignature, after: afterNames.layerSignature }),
+  );
+  check(
+    "name reroll adds exactly one history entry",
+    afterNames.history.undo === undoBeforeNames + 1,
+    `${undoBeforeNames} -> ${afterNames.history.undo}`,
+  );
+  check(
+    "document exposes stageSeeds after rerolls",
+    (await page.evaluate(() => Boolean(window.__atlasDebug.getDocument().params.stageSeeds))) ===
+      true,
+  );
+  await page.waitForFunction(
+    () => window.__atlasDebug.getSummary().save.phase === "saved",
+    undefined,
+    { timeout: 20_000, polling: 150 },
+  );
+  const autosavedSeeds = await page.evaluate(() => {
+    const raw = localStorage.getItem("atlas_forge.world.v1");
+    if (!raw) return null;
+    try {
+      return JSON.parse(raw).document?.params?.stageSeeds ?? null;
+    } catch {
+      return null;
+    }
+  });
+  check(
+    "autosave JSON carries stageSeeds after a name reroll",
+    autosavedSeeds !== null && typeof autosavedSeeds.human === "number",
+    JSON.stringify(autosavedSeeds),
+  );
+  const v4SummaryAliases = await summary(page);
+  check(
+    "debug summary exposes historyCount / activePreset / locks",
+    typeof v4SummaryAliases.historyCount === "number" &&
+      v4SummaryAliases.activePreset === v4SummaryAliases.scenarioId &&
+      typeof v4SummaryAliases.locks?.coast === "boolean",
+    JSON.stringify({
+      historyCount: v4SummaryAliases.historyCount,
+      activePreset: v4SummaryAliases.activePreset,
+      locks: v4SummaryAliases.locks,
+    }),
+  );
+
+  // readability banner: force unreadable water world, fix + dismiss
+  if (
+    (await page
+      .locator('[data-testid="group-params"] .panel-group-head')
+      .getAttribute("aria-expanded")) === "false"
+  ) {
+    await page.locator('[data-testid="group-params"] .panel-group-head').click();
+    await sleep(200);
+  }
+  await setSliderValue("param-seaLevel", 0.95);
+  await setSliderValue("param-riverDensity", 0);
+  await page.waitForSelector('[data-testid="readability-banner"]', { timeout: 20_000 });
+  const readabilityText = await page.locator('[data-testid="readability-banner"]').innerText();
+  check(
+    "readability banner appears for unreadable worlds",
+    readabilityText.includes("可能不好读"),
+    readabilityText.replace(/\n/g, " | ").slice(0, 180),
+  );
+  await screenshot(page, "25-readability.png");
+  const undoBeforeFix = (await summary(page)).history.undo;
+  const beforeFixSnapshot = await page.evaluate(() => {
+    const doc = window.__atlasDebug.getDocument();
+    return JSON.stringify({ params: doc.params, style: doc.style });
+  });
+  await page.locator('[data-testid="readability-fix"]').click();
+  await waitIdle(page);
+  const afterFixSnapshot = await page.evaluate(() => {
+    const doc = window.__atlasDebug.getDocument();
+    return JSON.stringify({ params: doc.params, style: doc.style });
+  });
+  check(
+    "one-click readability fix merges suggestions with one history entry",
+    (await summary(page)).history.undo === undoBeforeFix + 1 &&
+      afterFixSnapshot !== beforeFixSnapshot,
+    `${undoBeforeFix} -> ${(await summary(page)).history.undo}`,
+  );
+  await page.locator('[data-testid="readability-dismiss"]').click();
+  await sleep(200);
+  check(
+    "readability banner can be dismissed without blocking the editor",
+    (await page.locator('[data-testid="readability-banner"]').count()) === 0,
+  );
+
+  // stageSeeds in export JSON; legacy JSON without stageSeeds still imports
+  const v4Export = page.waitForEvent("download", { timeout: 20_000 });
+  await page.locator('[data-testid="export-json"]').click();
+  const v4JsonPath = join(OUT, "v4-export.json");
+  await (await v4Export).saveAs(v4JsonPath);
+  const v4Json = JSON.parse(readFileSync(v4JsonPath, "utf8"));
+  check(
+    "JSON export carries stageSeeds",
+    Boolean(v4Json.params?.stageSeeds) &&
+      typeof v4Json.params.stageSeeds.human === "number",
+    JSON.stringify(v4Json.params?.stageSeeds ?? null),
+  );
+  delete v4Json.params.stageSeeds;
+  const legacySeedsPath = join(OUT, "legacy-no-stage-seeds.json");
+  writeFileSync(legacySeedsPath, JSON.stringify(v4Json));
+  await page.locator('[data-testid="import-json-input"]').setInputFiles(legacySeedsPath);
+  await page.waitForFunction(
+    (seed) => window.__atlasDebug.getDocument().seed === seed,
+    v4Json.seed,
+    { timeout: 20_000, polling: 100 },
+  );
+  await waitIdle(page);
+  check(
+    "old JSON without stageSeeds imports and regenerates normally",
+    (await summary(page)).generation.phase !== "error" &&
+      (await page.evaluate(() => window.__atlasDebug.getDocument().params.stageSeeds)) ===
+        undefined,
+  );
+  await page.waitForFunction(
+    () => window.__atlasDebug.getSummary().save.phase === "saved",
+    undefined,
+    { timeout: 20_000, polling: 150 },
+  );
 
   // ── 14. collapsible layout persistence ─────────────────────────────
   log("collapsible layout");
@@ -1885,6 +2402,129 @@ async function main() {
     "duplicate toasts collapse into a single toast",
     (await page.locator('[data-testid="toast"]').count()) <= 1,
   );
+  await waitIdle(page);
+  await page.waitForFunction(
+    () => window.__atlasDebug.getSummary().hitBoxesSource !== null,
+    undefined,
+    { timeout: 30_000, polling: 120 },
+  );
+
+
+  // ── 19. first-run welcome panel (fresh profile) ────────────────────
+  log("first-run welcome");
+  const welcomeContext = await browser.newContext({ viewport: { width: 1680, height: 1000 } });
+  const welcomePage = await welcomeContext.newPage();
+  welcomePage.on("console", (message) => {
+    if (message.type() === "error") consoleErrors.push(`welcome: ${message.text()}`);
+  });
+  welcomePage.on("pageerror", (error) => pageErrors.push(`welcome: ${String(error)}`));
+  await welcomePage.goto(WEB_URL, { waitUntil: "domcontentloaded" });
+  await welcomePage.waitForFunction(() => Boolean(window.__atlasDebug), undefined, {
+    timeout: 30_000,
+  });
+  await welcomePage.waitForSelector('[data-testid="welcome"]', { timeout: 15_000 });
+  check(
+    "first visit shows the welcome scenario panel",
+    (await welcomePage.locator('[data-testid="welcome"]').count()) === 1 &&
+      (await welcomePage.locator('[data-testid^="preset-card-"]').count()) === 4,
+  );
+  await welcomePage.waitForFunction(
+    () =>
+      Array.from(document.querySelectorAll('[data-testid="welcome"] img.preset-thumb-img')).every(
+        (image) => image.complete && image.naturalWidth > 0,
+      ),
+    undefined,
+    { timeout: 15_000, polling: 100 },
+  );
+  check(
+    "scenario cards show distinct tagline/description lines (no duplicate copy)",
+    await welcomePage.evaluate(() =>
+      Array.from(document.querySelectorAll('[data-testid="welcome"] .preset-card')).every(
+        (card) => {
+          const tagline = card.querySelector(".preset-card-tagline")?.textContent?.trim() ?? "";
+          const desc = card.querySelector(".preset-card-desc")?.textContent?.trim() ?? "";
+          return tagline.length > 0 && desc.length > 0 && tagline !== desc;
+        },
+      ),
+    ),
+  );
+  check(
+    "welcome thumbnails no longer render the placeholder diamond glyph",
+    (await welcomePage.locator(".preset-thumb-glyph").count()) === 0,
+  );
+  check(
+    "scenario cards use the shipped preset thumbnails",
+    (await welcomePage.locator('[data-testid="welcome"] img.preset-thumb-img').count()) === 4 &&
+      (await welcomePage.evaluate(() =>
+        Array.from(document.querySelectorAll('[data-testid="welcome"] img.preset-thumb-img')).every(
+          (image) => image.naturalWidth > 0,
+        ),
+      )),
+  );
+  await welcomePage.screenshot({ path: join(OUT, "21-welcome.png") });
+  await welcomePage.locator('[data-testid="preset-card-archipelago"]').click();
+  await waitIdle(welcomePage);
+  const welcomeState = await summary(welcomePage);
+  check(
+    "picking a preset applies the scenario and closes the welcome panel",
+    welcomeState.scenarioId === "archipelago" &&
+      (await welcomePage.locator('[data-testid="welcome"]').count()) === 0,
+    `scenario=${welcomeState.scenarioId}`,
+  );
+  check(
+    "generated summary names the picked scenario",
+    (await welcomePage.locator('[data-testid="generated-summary"]').innerText()).includes(
+      "群岛贸易",
+    ),
+    await welcomePage.locator('[data-testid="generated-summary"]').innerText(),
+  );
+  const archipelagoParams = await welcomePage.evaluate(
+    () => window.__atlasDebug.getDocument().params,
+  );
+  check(
+    "archipelago preset applies its true continentScale (4.0)",
+    Math.abs(archipelagoParams.continentScale - 4) < 1e-9,
+    String(archipelagoParams.continentScale),
+  );
+  check(
+    "continent-scale slider accepts the 4.0 preset range",
+    (await welcomePage
+      .locator('[data-testid="param-continentScale"]')
+      .getAttribute("max")) === "4",
+  );
+  check(
+    "welcome completion is persisted (onboarded)",
+    (await welcomePage.evaluate(() =>
+      localStorage.getItem("atlas_forge.ui.onboarded"),
+    )) === "1",
+  );
+  const welcomeSeed = await welcomePage.evaluate(() =>
+    window.__atlasDebug.getDocument().seed,
+  );
+  await welcomePage.locator('[data-testid="preset-open"]').click();
+  await welcomePage.waitForSelector('[data-testid="welcome"]');
+  check("the scenario button reopens the welcome panel", true);
+  await welcomePage.locator('[data-testid="welcome-skip"]').click();
+  await sleep(150);
+  check(
+    "skip closes the panel without replacing the document",
+    (await welcomePage.locator('[data-testid="welcome"]').count()) === 0 &&
+      (await welcomePage.evaluate(() => window.__atlasDebug.getDocument().seed)) ===
+        welcomeSeed,
+  );
+  await welcomePage.locator('[data-testid="preset-open"]').click();
+  await welcomePage.waitForSelector('[data-testid="welcome"]');
+  await welcomePage.locator('[data-testid="welcome-random"]').click();
+  await waitIdle(welcomePage);
+  const randomState = await summary(welcomePage);
+  check(
+    "random-one picks a different scenario and closes the panel",
+    randomState.scenarioId !== "archipelago" &&
+      randomState.scenarioId.length > 0 &&
+      (await welcomePage.locator('[data-testid="welcome"]').count()) === 0,
+    `scenario=${randomState.scenarioId}`,
+  );
+  await welcomeContext.close();
 
   // ── 16. reduced motion ────────────────────────────────────────────
   log("reduced motion");
@@ -1893,6 +2533,7 @@ async function main() {
     reducedMotion: "reduce",
   });
   const reducedPage = await reducedContext.newPage();
+  await reducedPage.addInitScript(() => localStorage.setItem("atlas_forge.ui.onboarded", "1"));
   reducedPage.on("console", (message) => {
     if (message.type() === "error") consoleErrors.push(`reduced-motion: ${message.text()}`);
   });
@@ -1917,6 +2558,7 @@ async function main() {
   ]) {
     const narrowContext = await browser.newContext({ viewport });
     const narrowPage = await narrowContext.newPage();
+    await narrowPage.addInitScript(() => localStorage.setItem("atlas_forge.ui.onboarded", "1"));
     narrowPage.on("console", (message) => {
       if (message.type() === "error") {
         consoleErrors.push(`${viewport.width}px console: ${message.text()}`);
@@ -1966,6 +2608,21 @@ async function main() {
     await narrowContext.close();
   }
 
+  await page.bringToFront();
+  await page.waitForFunction(
+    () => {
+      const state = window.__atlasDebug.getSummary();
+      return (
+        state.generation.phase === "idle" &&
+        state.render.rendering === false &&
+        state.hitBoxesSource !== null &&
+        state.perf.lastGenerationMs !== null &&
+        state.perf.lastRenderMs !== null
+      );
+    },
+    undefined,
+    { timeout: 60_000, polling: 150 },
+  );
   const finalPerf = await summary(page);
   check(
     "polish does not regress generation/render budgets (sanity)",

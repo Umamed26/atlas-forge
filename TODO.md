@@ -201,3 +201,20 @@ pnpm build
 - GitHub：public 仓库 `Umamed26/atlas-forge`，main 分支，CI（typecheck + tests + build）通过
 
 **已知限制**：命中测试基于条目锚点 16px（长标签文字范围未覆盖，密集区取最近）；自动命名随机但落盘后确定；生成条目只能隐藏、用户新增条目可彻底删除。
+
+## 14. v0.3.0 全量打磨（2026-10-18）
+
+**范围**：不新增功能面，按真实用户路径打磨全部现有功能。
+
+| 项 | 结果 | 证据 |
+| --- | --- | --- |
+| 同源命中 | ✅ renderer `measureMapContent` 与绘制同源（bbox + drawOrder），长标签尾部可选中、重叠取最上层，~0.7ms@1024 | render 21 行断言（含一致性/性能）；Lead E2E 标签尾部点击 id 精确匹配；ui-qa 06e 截图 |
+| 撤销/重做一致 | ✅ 一次动作一条历史；选区/hover/自动保存/导出 0 条；跨功能撤销链 | qa-ui 141 断言；ui-dev 报告 |
+| 键盘/焦点/单一来源 | ✅ 17 条快捷键单源（帮助=行为）；输入框内 Delete 守卫；Esc 五级；焦点回画布 | Lead E2E `shortcuts debug=17 helpRows=17`、`rename guard unchanged=true` |
+| 导入/自动存档失败路径 | ✅ core 校验/规范化；坏 JSON 拒绝且文档不变；主/备双槽 + 损坏恢复面板 | Lead E2E `docUnchanged=true`、`recovery panel=1/recoveredSeed=20261018`；core 61 tests |
+| 导出可预期 | ✅ 尺寸/文件名/禁用原因/分阶段进度/取消/释放 canvas/服务端 abort 内存不累积 | Lead E2E 文件名 `atlas-Aetheris-20261018-parchment-1024.png`；server 连续 4096 rss 544→528MB |
+| 布局/窄屏 | ✅ 可折叠分组 + sticky + 记忆；1280×800、1024×768 无溢出 | Lead E2E `persisted=true`、`overflow={h:0,v:0}`；截图 12-narrow-* |
+| 命名/性能/a11y | ✅ 命名纯函数+RNG+去重后缀；hitTest ~0.1ms、hover 零重算；aria/focus/reduced-motion | Lead E2E hover seq 不变；qa-ui a11y/预算断言 |
+| 发布 | v0.3.0：main 提交 + tag + GitHub Release + CI 绿 | 见 GitHub Actions |
+
+**已知限制**：桌面优先（≥1024 不溢出，未承诺触控拖动/双击）；自动存档仅当前+上一份备份；取消服务端导出会产生一次预期中的 `ERR_ABORTED`。

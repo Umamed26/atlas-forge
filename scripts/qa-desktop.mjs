@@ -126,7 +126,11 @@ function log(message) {
 }
 
 function rel(path) {
-  return path ? relative(ROOT, path).split("\\").join("/") : null;
+  if (!path) return null;
+  const resolved = relative(ROOT, path).split("\\").join("/");
+  // Keep absolute paths absolute when the output dir lives outside the repo
+  // (e.g. ATLAS_QA_OUT_DIR=/tmp/...): "../../../tmp/..." is misleading.
+  return resolved.startsWith("../") ? resolve(path).split("\\").join("/") : resolved;
 }
 
 function readJsonSafe(path, fallback = null) {
@@ -1655,6 +1659,21 @@ function printSummary(report) {
 }
 
 // ── entrypoint ──────────────────────────────────────────────────────────────
+
+// `--print-target` resolves the packaged artifact without launching it: handy in
+// CI logs to prove which binary the run is about to drive.
+if (process.argv.includes("--print-target")) {
+  try {
+    const resolved = resolveTarget();
+    process.stdout.write(`${JSON.stringify(resolved, null, 2)}\n`);
+    process.exit(resolved.mode === "packaged" ? 0 : 3);
+  } catch (error) {
+    process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
+    if (error instanceof BlockedError) process.stderr.write(`${JSON.stringify(error.data, null, 2)}\n`);
+    process.exit(2);
+  }
+}
+
 let exitCode = 2;
 try {
   const result = await withTimeout(main(), GLOBAL_TIMEOUT_MS, "whole desktop QA run");

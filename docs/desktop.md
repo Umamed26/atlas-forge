@@ -95,7 +95,7 @@ pnpm desktop:dist                   # 正式产物：AppImage/deb、dmg/zip、ns
 
 | 平台 | 未打包目录（`--dir`） | 安装包 |
 | --- | --- | --- |
-| Linux | `apps/desktop/dist/linux-unpacked/` | `apps/desktop/dist/AtlasForge-<ver>-linux-*.AppImage`、`*.deb` |
+| Linux | `apps/desktop/dist/linux-unpacked/`（可执行文件名 `atlas-forge`） | `apps/desktop/dist/AtlasForge-<ver>-linux-x86_64.AppImage`、`AtlasForge-<ver>-linux-amd64.deb`（注意 AppImage 用 x86_64、deb 用 amd64） |
 | macOS | `apps/desktop/dist/mac*/Atlas Forge.app` | `*.dmg`、`*.zip` |
 | Windows | `apps/desktop/dist/win-unpacked/` | `*.exe`（nsis + portable） |
 
@@ -163,7 +163,13 @@ xvfb-run -a node scripts/qa-desktop.mjs
 
 # 显式指定被测产物（解包目录或可执行文件）
 ATLAS_DESKTOP_APP=apps/desktop/dist/linux-unpacked node scripts/qa-desktop.mjs
+
+# 只解析「将驱动哪个产物」而不启动（CI 日志里用来证明被测二进制）
+node scripts/qa-desktop.mjs --print-target
 ```
+
+`--print-target` 输出 `{mode, executablePath, args, appRoot, layout, asar}`：`mode` 为
+`packaged` 时退出码 0，仅兜底模式时退出码 3，前置缺失时 2。
 
 脚本用 `playwright-core` 的 `_electron.launch` 启动**打包产物**（不是 dev server，也不是
 「electron + 源码目录」），驱动真实渲染层 + 真实 preload/IPC，产出：
@@ -206,6 +212,11 @@ out/desktop-qa/
 | `offline-export` | 离线状态下再导出 SVG 1024 + PNG 1024 均成功；随后 `setOffline(false)` |
 | `console-clean` | 无未放行的 console error / pageerror / renderer crash（放行项显式记录在 `report.console.allowlisted`；当前桌面构建期望 console error 数为 0） |
 | `main-process-clean` | 主进程无 `Cannot find module` / uncaught / FATAL 等致命 stderr，且运行期间未提前退出 |
+
+**参考实测**（WSL2 / Ubuntu 26.04，`xvfb-run`，被测 `dist/linux-unpacked/atlas-forge`，v0.7.0）：
+15/15 通过；首屏 1024² 生成 811ms、512² 生成 334ms、4096 PNG 8.6s / 21.2 MB（IHDR 4096×4096）、
+离线生成 771ms 且 SVG/PNG 导出成功；console error / pageerror / crash / /api 请求均为 0。
+不同硬件会有差异，report.json 里是每次的真实值。
 
 ### 5.4 环境变量
 

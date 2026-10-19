@@ -1,6 +1,7 @@
 /** Top bar: world identity, generation controls, history, IO & help. */
 import { useEffect, useRef, useState, type ChangeEvent } from "react";
 
+import type { DesktopIntegration } from "../hooks/useDesktopIntegration";
 import { STYLE_PRESETS, type StylePresetId } from "../lib/constants";
 import { formatDocumentIssues, countIssues } from "../lib/coreDocumentAdapter";
 import {
@@ -10,6 +11,8 @@ import {
 import { useWorldStore } from "../state/worldStore";
 
 export interface TopBarProps {
+  /** Desktop (Electron) integration; `available === false` in the browser. */
+  desktop: DesktopIntegration;
   onOpenExport: () => void;
   onOpenHelp: () => void;
 }
@@ -58,7 +61,7 @@ function SeedInput() {
   );
 }
 
-export function TopBar({ onOpenExport, onOpenHelp }: TopBarProps) {
+export function TopBar({ desktop, onOpenExport, onOpenHelp }: TopBarProps) {
   const name = useWorldStore((state) => state.document.name);
   const preset = useWorldStore((state) => state.document.style.preset);
   const exportSize = useWorldStore((state) => state.exportSize);
@@ -211,40 +214,129 @@ export function TopBar({ onOpenExport, onOpenHelp }: TopBarProps) {
           ))}
         </select>
 
-        <div className="io-buttons">
-          <button
-            type="button"
-            className="btn btn--ghost"
-            title="导出世界 JSON（唯一真源，可随时导入恢复）"
-            data-testid="export-json"
-            onClick={handleExportJson}
-          >
-            导出 JSON
-          </button>
-          <button
-            type="button"
-            className="btn btn--ghost"
-            title="导入世界 JSON（需要 version: 1）"
-            data-testid="import-json"
-            disabled={importing}
-            onClick={() => fileInputRef.current?.click()}
-          >
-            {importing ? "导入中…" : "导入 JSON"}
-          </button>
-          <input
-            ref={fileInputRef}
-            type="file"
-            accept=".json,application/json"
-            className="visually-hidden"
-            data-testid="import-json-input"
-            onChange={(event) => void handleImportFile(event)}
-          />
-        </div>
+        {desktop.available ? (
+          <div className="io-buttons desktop-io" data-testid="desktop-io">
+            <button
+              type="button"
+              className="btn btn--ghost"
+              title="打开世界 JSON（Ctrl/⌘ + O）"
+              data-testid="desktop-open"
+              disabled={desktop.busy === "open"}
+              onClick={() => void desktop.openWorld()}
+            >
+              {desktop.busy === "open" ? "打开中…" : "打开"}
+            </button>
+            <details className="recent-files" data-testid="desktop-recent">
+              <summary
+                className="btn btn--ghost btn--small recent-files-toggle"
+                title="最近打开的世界（最多 3 个）"
+                data-testid="desktop-recent-toggle"
+              >
+                最近{desktop.recent.length > 0 ? ` ${desktop.recent.length}` : ""}
+              </summary>
+              <div className="recent-files-menu" role="menu" aria-label="最近打开的世界">
+                {desktop.recent.length === 0 ? (
+                  <span className="recent-files-empty">暂无最近文件</span>
+                ) : (
+                  desktop.recent.map((file, index) => (
+                    <button
+                      key={file.path}
+                      type="button"
+                      role="menuitem"
+                      className="recent-file-item"
+                      data-testid={`desktop-recent-item-${index}`}
+                      title={file.path}
+                      onClick={(event) => {
+                        // Close the native <details> before opening the dialog.
+                        event.currentTarget.closest("details")?.removeAttribute("open");
+                        void desktop.openRecent(file.path);
+                      }}
+                    >
+                      <span className="recent-file-name">{file.name}</span>
+                      <span className="recent-file-path">{file.path}</span>
+                    </button>
+                  ))
+                )}
+              </div>
+            </details>
+            <button
+              type="button"
+              className="btn btn--ghost"
+              title={
+                desktop.path
+                  ? `保存到 ${desktop.path}（Ctrl/⌘ + S）`
+                  : "保存世界 JSON（首次保存会询问位置）"
+              }
+              data-testid="desktop-save"
+              disabled={desktop.busy === "save"}
+              onClick={() => void desktop.saveWorld()}
+            >
+              {desktop.busy === "save" ? "保存中…" : "保存"}
+            </button>
+            <button
+              type="button"
+              className="btn btn--ghost"
+              title="另存为新的世界 JSON（Ctrl/⌘ + Shift + S）"
+              data-testid="desktop-save-as"
+              disabled={desktop.busy === "save"}
+              onClick={() => void desktop.saveWorldAs()}
+            >
+              另存为
+            </button>
+            {desktop.dirty ? (
+              <span
+                className="desktop-dirty"
+                data-testid="desktop-dirty"
+                title={
+                  desktop.path
+                    ? `有未保存修改：${desktop.path}`
+                    : "有未保存修改：尚未写入文件"
+                }
+              >
+                ● 未保存
+              </span>
+            ) : null}
+          </div>
+        ) : (
+          <div className="io-buttons">
+            <button
+              type="button"
+              className="btn btn--ghost"
+              title="导出世界 JSON（唯一真源，可随时导入恢复）"
+              data-testid="export-json"
+              onClick={handleExportJson}
+            >
+              导出 JSON
+            </button>
+            <button
+              type="button"
+              className="btn btn--ghost"
+              title="导入世界 JSON（需要 version: 1）"
+              data-testid="import-json"
+              disabled={importing}
+              onClick={() => fileInputRef.current?.click()}
+            >
+              {importing ? "导入中…" : "导入 JSON"}
+            </button>
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept=".json,application/json"
+              className="visually-hidden"
+              data-testid="import-json-input"
+              onChange={(event) => void handleImportFile(event)}
+            />
+          </div>
+        )}
 
         <button
           type="button"
           className="btn btn--accent"
-          title={`导出 PNG · 当前选择 ${exportSize}²（1024/2048 本地，4096/8192 服务端）`}
+          title={
+            desktop.available
+              ? `导出 PNG / SVG · 当前选择 ${exportSize}²（桌面本地渲染，无需服务端）`
+              : `导出 PNG · 当前选择 ${exportSize}²（1024/2048 本地，4096/8192 服务端）`
+          }
           data-testid="export-png"
           onClick={onOpenExport}
         >

@@ -101,7 +101,7 @@ export type SimTrigger = "now" | "debounce";
 export type GenerationPhase = "idle" | "queued" | "generating" | "error";
 export type ToastKind = "info" | "success" | "error";
 export type SavePhase = "idle" | "saving" | "saved" | "error";
-export type ServerPhase = "unknown" | "online" | "offline";
+export type ServerPhase = "unknown" | "online" | "offline" | "desktop";
 
 export interface ToastAction {
   kind: "export-json" | "recover-autosave";

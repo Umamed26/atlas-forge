@@ -15,6 +15,7 @@ import {
   SIM_DEBOUNCE_MS,
 } from "../lib/constants";
 import { installDebugApi } from "../lib/debug";
+import { isDesktop } from "../lib/desktopBridge";
 import { loadRenderFonts } from "../lib/fonts";
 import { saveAutosave } from "../lib/documentIO";
 import { createThumbnail } from "../lib/history";
@@ -304,8 +305,11 @@ export function useAppPipeline(): void {
     };
   }, []);
 
-  // ── DEV QA hooks (window.__atlasDebug / __atlasDebugDocument) ────────
+  // ── QA hooks (window.__atlasDebug / __atlasDebugDocument) ────────────
+  // Browser production keeps them dev-only. The packaged desktop build also
+  // ships the read-only QA surface so desktop E2E can read the same
+  // document/summary as the web harness; it exposes no privileged IPC surface.
   useEffect(() => {
-    if (import.meta.env.DEV) installDebugApi();
+    if (import.meta.env.DEV || isDesktop()) installDebugApi();
   }, []);
 }

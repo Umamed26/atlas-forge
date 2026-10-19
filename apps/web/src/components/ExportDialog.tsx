@@ -10,6 +10,11 @@ import { useEffect, useRef, useState } from "react";
 
 import { EXPORT_PRESETS, type ExportPreset } from "../lib/constants";
 import { refreshServerStatus } from "../lib/api";
+import {
+  exportPng as desktopExportPng,
+  exportSvg as desktopExportSvg,
+  isDesktop,
+} from "../lib/desktopBridge";
 import { ExportError, exportLocalPng, exportServerPng, pngFilename } from "../lib/exportPng";
 import { exportSvg, getClientSvgRenderer, hasSvgExport } from "../lib/exportSvg";
 import { downloadBlob, formatMs } from "../lib/utils";
@@ -27,6 +32,8 @@ interface ExportOutcome {
     simMs: number | null;
     renderMs: number | null;
     fontsReady: boolean | null;
+    /** Rendered + written by the Electron main process (no HTTP server). */
+    desktop?: boolean;
   };
 }
 
@@ -39,6 +46,8 @@ interface ExportFailure {
 export interface ExportDialogProps {
   open: boolean;
   onClose: () => void;
+  /** Format preselected by the native menu (export-png / export-svg). */
+  initialFormat?: "png" | "svg";
 }
 
 function presetFor(size: number): ExportPreset {
@@ -47,6 +56,9 @@ function presetFor(size: number): ExportPreset {
 
 const SERVER_STAGES = ["上传世界数据", "服务端生成", "服务端渲染", "下载 PNG"];
 
+/** Desktop exports have no IPC progress channel: stage the label locally. */
+const DESKTOP_STAGES = ["生成世界图层", "主进程光栅化", "编码并写入文件"];
+
 const SVG_PRINT_HINTS: Record<number, string> = {
   1024: "A6 @300dpi",
   2048: "A5 @300dpi",
@@ -54,7 +66,8 @@ const SVG_PRINT_HINTS: Record<number, string> = {
   8192: "A1 @300dpi",
 };
 
-export function ExportDialog({ open, onClose }: ExportDialogProps) {
+export function ExportDialog({ open, onClose, initialFormat = "png" }: ExportDialogProps) {
+  const desktop = isDesktop();
   const exportSize = useWorldStore((state) => state.exportSize);
   const documentName = useWorldStore((state) => state.document.name);
   const documentSeed = useWorldStore((state) => state.document.seed);
@@ -84,12 +97,15 @@ export function ExportDialog({ open, onClose }: ExportDialogProps) {
   const preset = presetFor(exportSize);
   const working = phase === "working";
 
-  const serverOffline = server.phase === "offline";
-  const selectedNeedsServer = format === "png" && preset.mode === "server";
-  const svgNeedsServer = format === "svg" && !svgClientMode;
+  // Desktop exports are rendered/written by the Electron main process, so the
+  // Node API/offline state and the browser SVG renderer are irrelevant there.
+  const serverOffline = !desktop && server.phase === "offline";
+  const selectedNeedsServer = !desktop && format === "png" && preset.mode === "server";
+  const svgNeedsServer = !desktop && format === "svg" && !svgClientMode;
   const disabledReason = (() => {
     if (generationActive) return "正在生成世界，请等待完成后再导出";
     if (format === "svg") {
+      if (desktop) return null;
       if (svgReady === null) return "正在检测 SVG 导出能力…";
       if (svgReady === false) return "SVG 导出不可用：渲染器与服务端均未就绪，可回退 PNG";
       if (svgNeedsServer && serverOffline) return "SVG 需要服务端渲染，当前离线，可回退 PNG";
@@ -99,9 +115,15 @@ export function ExportDialog({ open, onClose }: ExportDialogProps) {
     return null;
   })();
 
+  // Native menu "导出 PNG/SVG" preselects the matching format.
   useEffect(() => {
     if (!open) return;
-    void refreshServerStatus();
+    setFormat(initialFormat);
+  }, [open, initialFormat]);
+
+  useEffect(() => {
+    if (!open) return;
+    if (!desktop) void refreshServerStatus();
     let cancelled = false;
     void (async () => {
       const [ready, renderer] = await Promise.all([hasSvgExport(), getClientSvgRenderer()]);
@@ -112,7 +134,7 @@ export function ExportDialog({ open, onClose }: ExportDialogProps) {
     return () => {
       cancelled = true;
     };
-  }, [open]);
+  }, [open, desktop]);
 
   useEffect(() => {
     if (!working) return;
@@ -123,7 +145,7 @@ export function ExportDialog({ open, onClose }: ExportDialogProps) {
 
   // Server-side exports have no progress events: stage the label locally.
   useEffect(() => {
-    if (!working || format !== "png" || preset.mode !== "server") return;
+    if (!working || desktop || format !== "png" || preset.mode !== "server") return;
     let index = 0;
     setStageIndex(0);
     setStageLabel(SERVER_STAGES[0]);
@@ -136,7 +158,23 @@ export function ExportDialog({ open, onClose }: ExportDialogProps) {
     }, 1400);
     return () => window.clearInterval(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [working, preset.mode, format]);
+  }, [working, preset.mode, format, desktop]);
+
+  // Desktop exports also lack IPC progress: animate the local stage labels.
+  useEffect(() => {
+    if (!working || !desktop) return;
+    let index = 0;
+    setStageIndex(0);
+    setStageLabel(DESKTOP_STAGES[0]);
+    setProgress(0.12);
+    const timer = window.setInterval(() => {
+      index = Math.min(DESKTOP_STAGES.length - 1, index + 1);
+      setStageLabel(DESKTOP_STAGES[index]);
+      setProgress(Math.min(0.92, 0.12 + index * 0.32));
+    }, 1600);
+    return () => window.clearInterval(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [working, desktop, format]);
 
   // Abort any in-flight export when the dialog unmounts.
   useEffect(() => {
@@ -169,7 +207,9 @@ export function ExportDialog({ open, onClose }: ExportDialogProps) {
   };
 
   const handleClose = () => {
-    if (working) cancelExport(false);
+    // Desktop IPC renders cannot be aborted: the main process finishes writing
+    // and the completion toast still lands after the dialog closed.
+    if (working && !desktop) cancelExport(false);
     onClose();
   };
 
@@ -187,6 +227,48 @@ export function ExportDialog({ open, onClose }: ExportDialogProps) {
     const storeState = useWorldStore.getState();
     const document = storeState.document;
     try {
+      if (desktop) {
+        // Electron main process: native save dialog + local render + write.
+        // Works fully offline, including 4096 / 8192 and SVG.
+        const printMm = Math.round(((size / 300) * 25.4 + Number.EPSILON) * 10) / 10;
+        const request =
+          formatOverride === "svg"
+            ? { document, size, physical: { dpi: 300, widthMm: printMm, heightMm: printMm } }
+            : { document, size };
+        const result =
+          formatOverride === "svg"
+            ? await desktopExportSvg(request)
+            : await desktopExportPng(request);
+        if (!result || result.canceled) {
+          setPhase("idle");
+          setStageLabel("已取消导出");
+          setProgress(0);
+          setCancelReason(null);
+          return;
+        }
+        const savedPath = result.path ?? "";
+        setOutcome({
+          filename: savedPath || "已保存",
+          meta: {
+            size,
+            simSize: null,
+            totalMs: result.ms ?? null,
+            simMs: null,
+            renderMs: null,
+            fontsReady: null,
+            desktop: true,
+          },
+        });
+        setPhase("success");
+        setProgress(1);
+        useWorldStore
+          .getState()
+          .pushToast(
+            "success",
+            `${formatOverride === "svg" ? "SVG" : "PNG"} 已保存：${savedPath}`,
+          );
+        return;
+      }
       if (formatOverride === "svg") {
         const result = await exportSvg(document, size, {
           signal: controller.signal,
@@ -255,7 +337,11 @@ export function ExportDialog({ open, onClose }: ExportDialogProps) {
       }
       const kind = error instanceof ExportError ? error.kind : "render";
       const message = error instanceof Error ? error.message : String(error);
-      const usedServer = formatOverride === "svg" ? !svgClientMode : mode === "server";
+      const usedServer = desktop
+        ? false
+        : formatOverride === "svg"
+          ? !svgClientMode
+          : mode === "server";
       setFailure({ kind, message, server: usedServer });
       setPhase("error");
       if (usedServer) {
@@ -283,14 +369,20 @@ export function ExportDialog({ open, onClose }: ExportDialogProps) {
   const footer = (
     <div className="dialog-actions">
       {working ? (
-        <button
-          type="button"
-          className="btn btn--ghost"
-          data-testid="export-cancel-running"
-          onClick={() => cancelExport()}
-        >
-          取消导出
-        </button>
+        desktop ? (
+          <span className="desktop-working-hint" data-testid="desktop-export-working">
+            桌面本地渲染与写盘不可中断，请稍候…
+          </span>
+        ) : (
+          <button
+            type="button"
+            className="btn btn--ghost"
+            data-testid="export-cancel-running"
+            onClick={() => cancelExport()}
+          >
+            取消导出
+          </button>
+        )
       ) : (
         <button type="button" className="btn btn--ghost" onClick={handleClose} data-testid="export-cancel">
           {phase === "success" ? "关闭" : "取消"}
@@ -328,6 +420,16 @@ export function ExportDialog({ open, onClose }: ExportDialogProps) {
       width={640}
       testId="export-dialog"
     >
+      {desktop ? (
+        <div className="desktop-export-badge" data-testid="desktop-export-note">
+          <span className="desktop-export-badge-icon" aria-hidden="true">⌘</span>
+          <span>
+            <strong>桌面本地渲染，无需服务端</strong>
+            ：4096 / 8192 PNG 与 SVG 均由本机主进程生成并直接写入文件，断网也能导出。
+          </span>
+        </div>
+      ) : null}
+
       <div className="export-format-tabs" role="group" aria-label="导出格式">
         <button
           type="button"
@@ -349,8 +451,14 @@ export function ExportDialog({ open, onClose }: ExportDialogProps) {
           className={`export-format-tab ${format === "svg" ? "is-selected" : ""}`}
           data-testid="export-format-svg"
           aria-pressed={format === "svg"}
-          disabled={working || svgReady === false}
-          title={svgReady === false ? "SVG 渲染器与服务端均未就绪" : "矢量路径与文字，适合印刷"}
+          disabled={working || (!desktop && svgReady === false)}
+          title={
+            desktop
+              ? "桌面主进程本地渲染，无需服务端"
+              : svgReady === false
+                ? "SVG 渲染器与服务端均未就绪"
+                : "矢量路径与文字，适合印刷"
+          }
           onClick={() => {
             if (format === "svg") return;
             setFormat("svg");
@@ -359,18 +467,23 @@ export function ExportDialog({ open, onClose }: ExportDialogProps) {
         >
           <span className="export-format-tab-title">SVG 矢量（印刷）</span>
           <span className="export-format-tab-note">
-            无限缩放 / 可编辑 · {svgClientMode ? "客户端 renderSvg" : "服务端 /api/export/svg"}
+            无限缩放 / 可编辑 ·{" "}
+            {desktop
+              ? "桌面主进程 renderSvg"
+              : svgClientMode
+                ? "客户端 renderSvg"
+                : "服务端 /api/export/svg"}
           </span>
         </button>
       </div>
 
       <div className="export-grid">
         {EXPORT_PRESETS.map((option) => {
-          const requiresServer = option.mode === "server";
+          const requiresServer = option.mode === "server" && !desktop;
           const sizeDisabled =
             working ||
             (format === "svg"
-              ? svgReady !== true
+              ? !desktop && svgReady !== true
               : requiresServer && serverOffline);
           return (
             <button
@@ -390,12 +503,16 @@ export function ExportDialog({ open, onClose }: ExportDialogProps) {
               <span className="export-card-size">{option.label}</span>
               <span className="export-card-note">{option.note}</span>
               <span className="export-card-mode">
-                {requiresServer
-                  ? serverOffline
-                    ? "服务端离线 · 需 Node API"
-                    : "服务端渲染"
-                  : "本地渲染"}{" "}
-                · {option.estimate}
+                {desktop
+                  ? option.size >= 4096
+                    ? "桌面本地渲染 · 无需服务端"
+                    : "桌面本地渲染"
+                  : requiresServer
+                    ? serverOffline
+                      ? "服务端离线 · 需 Node API"
+                      : "服务端渲染"
+                    : "本地渲染"}{" "}
+                · {desktop ? "由本机主进程写盘" : option.estimate}
               </span>
             </button>
           );
@@ -427,23 +544,29 @@ export function ExportDialog({ open, onClose }: ExportDialogProps) {
         <div className="export-summary-row">
           <span>渲染方式</span>
           <strong>
-            {format === "svg"
-              ? svgClientMode
-                ? "客户端 renderSvg（矢量路径 + 文字）"
-                : "POST /api/export/svg（Node 矢量渲染）"
-              : preset.mode === "local"
-                ? "浏览器离屏 Canvas（Web Worker）"
-                : "POST /api/render（Node + @napi-rs/canvas）"}
+            {desktop
+              ? format === "svg"
+                ? "桌面主进程 renderSvg（矢量路径 + 文字）"
+                : "桌面主进程 @atlas/render（离线光栅）"
+              : format === "svg"
+                ? svgClientMode
+                  ? "客户端 renderSvg（矢量路径 + 文字）"
+                  : "POST /api/export/svg（Node 矢量渲染）"
+                : preset.mode === "local"
+                  ? "浏览器离屏 Canvas（Web Worker）"
+                  : "POST /api/render（Node + @napi-rs/canvas）"}
           </strong>
         </div>
         <div className="export-summary-row">
           <span>导出服务</span>
           <strong data-testid="export-server-status">
-            {server.phase === "online"
-              ? `在线${server.latencyMs !== null ? ` · ${Math.round(server.latencyMs)}ms` : ""}`
-              : server.phase === "offline"
-                ? "离线"
-                : "探测中…"}
+            {desktop
+              ? "桌面本地（无需服务端）"
+              : server.phase === "online"
+                ? `在线${server.latencyMs !== null ? ` · ${Math.round(server.latencyMs)}ms` : ""}`
+                : server.phase === "offline"
+                  ? "离线"
+                  : "探测中…"}
           </strong>
         </div>
       </div>
@@ -477,9 +600,13 @@ export function ExportDialog({ open, onClose }: ExportDialogProps) {
 
       {phase === "success" && outcome ? (
         <div className="dialog-success" data-testid="export-result">
-          <strong data-testid="export-result-filename">导出完成：{outcome.filename}</strong>
+          <strong data-testid="export-result-filename">
+            {outcome.meta.desktop ? "已保存：" : "导出完成："}
+            {outcome.filename}
+          </strong>
           <span>
             用时 {formatMs(outcome.meta.totalMs)}
+            {outcome.meta.desktop ? " · 桌面本地渲染，无需服务端" : ""}
             {outcome.meta.simMs !== null ? ` · 模拟 ${formatMs(outcome.meta.simMs)}` : ""}
             {outcome.meta.renderMs !== null ? ` · 渲染 ${formatMs(outcome.meta.renderMs)}` : ""}
             {outcome.meta.simSize !== null ? ` · 模拟网格 ${outcome.meta.simSize}²` : ""}
@@ -487,6 +614,25 @@ export function ExportDialog({ open, onClose }: ExportDialogProps) {
               ? ` · 字体 EB Garamond ${outcome.meta.fontsReady ? "已加载" : "回退"}`
               : ""}
           </span>
+          {outcome.meta.desktop ? (
+            <button
+              type="button"
+              className="btn btn--small btn--ghost"
+              data-testid="export-copy-path"
+              onClick={() => {
+                void (async () => {
+                  try {
+                    await navigator.clipboard.writeText(outcome.filename);
+                    useWorldStore.getState().pushToast("success", "已复制保存路径");
+                  } catch {
+                    useWorldStore.getState().pushToast("error", "复制路径失败，请手动选择文本");
+                  }
+                })();
+              }}
+            >
+              复制保存路径
+            </button>
+          ) : null}
         </div>
       ) : null}
 
@@ -504,11 +650,21 @@ export function ExportDialog({ open, onClose }: ExportDialogProps) {
               改用 2048 本地导出
             </button>
           ) : null}
+          {desktop ? (
+            <span className="dialog-note">
+              桌面本地渲染失败：可尝试降低尺寸（8192² 约需 270MB 内存）或检查磁盘空间。
+            </span>
+          ) : null}
         </div>
       ) : null}
 
       <p className="dialog-note">
-        {format === "svg" ? (
+        {desktop ? (
+          <>
+            导出由 Electron 主进程使用 <code>@atlas/core</code> + <code>@atlas/render</code> 本机完成：
+            无需 Node API、断网可用；保存对话框与写盘都在主进程，导出不会修改世界文档（JSON 仍是唯一真源）。
+          </>
+        ) : format === "svg" ? (
           <>
             SVG 优先使用客户端渲染器；不可用时走 <code>POST /api/export/svg</code>。
             矢量文件包含路径与文字，适合印刷与 Illustrator 二次编辑；文件名格式

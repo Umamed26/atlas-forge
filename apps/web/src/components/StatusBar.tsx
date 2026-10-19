@@ -114,7 +114,10 @@ export function StatusBar() {
 
   let serverText = "服务端未知";
   let serverTitle = "正在探测 /api/health";
-  if (server.phase === "online") {
+  if (server.phase === "desktop") {
+    serverText = "桌面端 · 本地渲染";
+    serverTitle = "Electron 主进程本地渲染与写盘，无需 Node API";
+  } else if (server.phase === "online") {
     serverText = `服务端在线${server.latencyMs !== null ? ` ${Math.round(server.latencyMs)}ms` : ""}`;
     serverTitle = `Node 导出服务可用（最大 ${server.maxSize ?? "—"}px）`;
   } else if (server.phase === "offline") {
@@ -142,8 +145,8 @@ export function StatusBar() {
       <span className="statusbar-item" title="地图缩放比例">
         缩放 {zoomPercent}%
       </span>
-      <span className="statusbar-item" title={serverTitle}>
-        <span className={`status-dot status-dot--${server.phase === "online" ? "ok" : server.phase === "offline" ? "warn" : "idle"}`} aria-hidden="true" />
+      <span className="statusbar-item" title={serverTitle} data-testid="server-status">
+        <span className={`status-dot status-dot--${server.phase === "online" || server.phase === "desktop" ? "ok" : server.phase === "offline" ? "warn" : "idle"}`} aria-hidden="true" />
         {serverText}
       </span>
       <span className="statusbar-item" title={saveTitle} data-testid="save-status">

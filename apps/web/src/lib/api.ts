@@ -1,4 +1,5 @@
 /** Node backend health probe + server status store sync. */
+import { isDesktop } from "./desktopBridge";
 import { useWorldStore } from "../state/worldStore";
 
 export interface ServerHealth {
@@ -44,6 +45,15 @@ export async function fetchServerHealth(timeoutMs = 3000): Promise<ServerHealth>
 
 /** Probe the API and mirror the result into the world store. */
 export async function refreshServerStatus(): Promise<ServerHealth> {
+  if (isDesktop()) {
+    // The Electron shell has no HTTP server: probing `/api/health` under the
+    // packaged `app://` origin would 404 (and pollute the renderer console).
+    // Desktop exports go through IPC instead — mark the status explicitly.
+    useWorldStore
+      .getState()
+      .setServerStatus({ phase: "desktop", latencyMs: null, maxSize: null });
+    return { online: false, latencyMs: null, maxSize: null };
+  }
   const health = await fetchServerHealth();
   useWorldStore.getState().setServerStatus({
     phase: health.online ? "online" : "offline",

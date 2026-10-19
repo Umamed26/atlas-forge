@@ -2909,6 +2909,399 @@ async function main() {
 
   await screenshot(page, "13-final.png");
 
+  // ── 20. desktop shell integration (window.atlasDesktop stubbed) ─────
+  // The packaged Electron app injects the real preload bridge; in the browser
+  // harness we stub the exact IPC contract (apps/desktop/shared/ipc.ts) to
+  // verify: native open/save controls, recent files, menu commands, dirty
+  // title updates, offline 8192 export and drag&drop path resolution. The
+  // stubbed page also exercises the production-only QA hook path.
+  log("desktop shell integration");
+  check(
+    "browser build (no desktop bridge) keeps the JSON import/export path",
+    (await page.locator('[data-testid="desktop-open"]').count()) === 0 &&
+      (await page.locator('[data-testid="desktop-dirty"]').count()) === 0 &&
+      (await page.locator('[data-testid="import-json"]').count()) === 1 &&
+      (await page.locator('[data-testid="export-json"]').count()) === 1,
+  );
+
+  const desktopContext = await browser.newContext({
+    viewport: { width: 1680, height: 1000 },
+  });
+  const desktopPage = await desktopContext.newPage();
+  await desktopPage.addInitScript(() => {
+    localStorage.setItem("atlas_forge.ui.onboarded", "1");
+    const calls = [];
+    window.__desktopCalls = calls;
+    window.__desktopDocState = null;
+    window.__desktopMenuHandler = null;
+    window.__desktopOpenFileHandler = null;
+    window.__desktopDropDoc = null;
+    window.__desktopRecent = [
+      { path: "/home/qa/docs/harbor.atlas.json", name: "harbor", savedAt: "2026-10-18T10:00:00.000Z", hash: "aaaa" },
+      { path: "/home/qa/docs/frost.atlas.json", name: "frost", savedAt: "2026-10-17T10:00:00.000Z", hash: "bbbb" },
+      { path: "/home/qa/docs/ash.atlas.json", name: "ash", savedAt: "2026-10-16T10:00:00.000Z", hash: "cccc" },
+    ];
+    window.atlasDesktop = {
+      isDesktop: true,
+      getAppInfo: async () => ({
+        platform: "linux",
+        version: "0.7.0",
+        electron: "44.4.5",
+        chrome: "140.0.0.0",
+        userDataDir: "/home/qa/.config/atlas-forge",
+        offlineExports: { png: [1024, 2048, 4096, 8192], svg: [1024, 2048, 4096, 8192] },
+      }),
+      openWorld: async () => {
+        calls.push(["openWorld"]);
+        return null;
+      },
+      readWorldFile: async (path) => {
+        calls.push(["readWorldFile", path]);
+        return window.__desktopDropDoc
+          ? { path, document: window.__desktopDropDoc, issues: [] }
+          : null;
+      },
+      saveWorld: async (request) => {
+        calls.push(["saveWorld", request.path ?? null]);
+        window.__desktopSaveDoc = request.document;
+        return {
+          canceled: false,
+          path: request.path ?? "/home/qa/docs/qa-world.atlas.json",
+        };
+      },
+      saveWorldAs: async (request) => {
+        calls.push(["saveWorldAs", request.path ?? null]);
+        return { canceled: false, path: "/home/qa/docs/qa-world-copy.atlas.json" };
+      },
+      exportPng: async (request) => {
+        calls.push(["exportPng", request.size]);
+        return {
+          canceled: false,
+          path: `/home/qa/docs/export-${request.size}.png`,
+          bytes: 4096,
+          ms: 12,
+        };
+      },
+      exportSvg: async (request) => {
+        calls.push(["exportSvg", request.size, request.physical?.widthMm ?? null]);
+        return {
+          canceled: false,
+          path: `/home/qa/docs/export-${request.size}.svg`,
+          bytes: 2048,
+          ms: 9,
+        };
+      },
+      getRecentFiles: async () => window.__desktopRecent,
+      clearRecentFiles: async () => {},
+      setDocumentState: (state) => {
+        window.__desktopDocState = state;
+      },
+      onMenuCommand: (handler) => {
+        window.__desktopMenuHandler = handler;
+        return () => {
+          window.__desktopMenuHandler = null;
+        };
+      },
+      onOpenWorldFile: (handler) => {
+        window.__desktopOpenFileHandler = handler;
+        return () => {
+          window.__desktopOpenFileHandler = null;
+        };
+      },
+      log: () => {},
+    };
+    // Electron 32+: File.path is gone; the preload resolves it via webUtils.
+    window.atlasDesktopFilePath = () => "/home/qa/docs/dropped.atlas.json";
+  });
+  desktopPage.on("console", (message) => {
+    if (message.type() === "error") consoleErrors.push(`desktop: ${message.text()}`);
+  });
+  desktopPage.on("pageerror", (error) => pageErrors.push(`desktop: ${String(error)}`));
+  desktopPage.on("requestfailed", (request) => {
+    const url = request.url();
+    const errorText = request.failure()?.errorText ?? "";
+    if (url.includes("favicon") || url.includes("/api/health")) return;
+    if (request.failure()) {
+      failedRequests.push(`desktop: ${request.method()} ${url} :: ${errorText}`);
+    }
+  });
+  const desktopApiRequests = [];
+  desktopPage.on("request", (request) => {
+    const url = request.url();
+    if (url.includes("/api/")) desktopApiRequests.push(url);
+  });
+  desktopPage.on("response", (response) => {
+    if (response.status() >= 400 && !response.url().includes("/api/health")) {
+      httpErrors.push(`desktop ${response.status()} ${response.url()}`);
+    }
+  });
+  await desktopPage.goto(WEB_URL, { waitUntil: "domcontentloaded", timeout: 60_000 });
+  await desktopPage.waitForSelector('[data-testid="map-canvas"]', { timeout: 30_000 });
+  await desktopPage.waitForFunction(() => Boolean(window.__atlasDebug), undefined, {
+    timeout: 20_000,
+  });
+  await waitIdle(desktopPage);
+  await desktopPage.waitForFunction(
+    () => document.querySelectorAll('[data-testid^="desktop-recent-item-"]').length === 3,
+    undefined,
+    { timeout: 10_000, polling: 100 },
+  );
+  await sleep(300);
+
+  const desktopUi = await desktopPage.evaluate(() => {
+    const scrolling = document.scrollingElement;
+    const offenders = [...document.querySelectorAll("body *")]
+      .filter((element) => {
+        const rect = element.getBoundingClientRect();
+        return rect.width > 0 && (rect.right > window.innerWidth + 1 || rect.left < -1);
+      })
+      .slice(0, 3)
+      .map((element) => `${element.tagName}.${element.className?.toString().slice(0, 30)}`);
+    return {
+      open: document.querySelectorAll('[data-testid="desktop-open"]').length === 1,
+      save: document.querySelectorAll('[data-testid="desktop-save"]').length === 1,
+      saveAs: document.querySelectorAll('[data-testid="desktop-save-as"]').length === 1,
+      recentItems: document.querySelectorAll('[data-testid^="desktop-recent-item-"]').length,
+      webJsonImport: document.querySelectorAll('[data-testid="import-json"]').length,
+      serverStatus: document.querySelector('[data-testid="server-status"]')?.textContent?.trim() ?? "",
+      debugApi: Boolean(window.__atlasDebug),
+      scrollWidth: scrolling.scrollWidth,
+      innerWidth: window.innerWidth,
+      offenders,
+    };
+  });
+  check(
+    "desktop bridge swaps JSON import for native 打开 / 保存 / 另存为 controls",
+    desktopUi.open && desktopUi.save && desktopUi.saveAs && desktopUi.webJsonImport === 0,
+    JSON.stringify(desktopUi),
+  );
+  check(
+    "desktop menu shows the three most recent world files",
+    desktopUi.recentItems === 3,
+    `items=${desktopUi.recentItems}`,
+  );
+  check(
+    "desktop top bar fits 1680×1000 without overflow",
+    desktopUi.scrollWidth <= desktopUi.innerWidth && desktopUi.offenders.length === 0,
+    `scrollWidth=${desktopUi.scrollWidth} viewport=${desktopUi.innerWidth} offenders=${desktopUi.offenders.join(" | ")}`,
+  );
+  check(
+    "desktop build keeps the read-only QA hook available",
+    desktopUi.debugApi === true,
+  );
+  check(
+    "desktop status bar reports local rendering instead of a server probe",
+    desktopUi.serverStatus.includes("桌面端") && desktopUi.serverStatus.includes("本地渲染"),
+    desktopUi.serverStatus,
+  );
+
+  // Recent file click resolves the path through IPC and imports the world.
+  const recentOpened = await desktopPage.evaluate(() => {
+    const documentClone = JSON.parse(JSON.stringify(window.__atlasDebug.getDocument()));
+    documentClone.name = "最近世界";
+    window.__desktopDropDoc = documentClone;
+    document.querySelector('[data-testid="desktop-recent-item-0"]')?.click();
+    return true;
+  });
+  await desktopPage.waitForFunction(
+    () =>
+      window.__desktopCalls.some(
+        (call) => call[0] === "readWorldFile" && call[1] === "/home/qa/docs/harbor.atlas.json",
+      ),
+    undefined,
+    { timeout: 10_000, polling: 100 },
+  );
+  await desktopPage.waitForFunction(
+    () => window.__atlasDebug.getDocument().name === "最近世界",
+    undefined,
+    { timeout: 10_000, polling: 100 },
+  );
+  check(
+    "clicking a recent file opens it through readWorldFile(path)",
+    recentOpened === true &&
+      (await desktopPage.evaluate(() => window.__atlasDebug.getDocument().name)) === "最近世界",
+  );
+  await waitIdle(desktopPage);
+
+  // Native menu: export-png preselects PNG and offline 8192 is enabled.
+  await desktopPage.evaluate(() => window.__desktopMenuHandler?.("export-png"));
+  await desktopPage.waitForSelector('[data-testid="export-dialog"]', { timeout: 10_000 });
+  await desktopPage.waitForSelector('[data-testid="desktop-export-note"]', { timeout: 5_000 });
+  const desktopExportUi = await desktopPage.evaluate(() => ({
+    note: document.querySelector('[data-testid="desktop-export-note"]')?.textContent ?? "",
+    pngSelected:
+      document.querySelector('[data-testid="export-format-png"]')?.getAttribute("aria-pressed") ===
+      "true",
+    card8192Disabled:
+      document.querySelector('[data-testid="export-size-8192"]')?.hasAttribute("disabled") ?? true,
+    server: document.querySelector('[data-testid="export-server-status"]')?.textContent?.trim() ?? "",
+  }));
+  check(
+    "menu export-png preselects PNG and marks「桌面本地渲染，无需服务端」",
+    desktopExportUi.pngSelected &&
+      desktopExportUi.note.includes("桌面本地渲染，无需服务端") &&
+      desktopExportUi.card8192Disabled === false &&
+      desktopExportUi.server.includes("桌面本地"),
+    JSON.stringify(desktopExportUi),
+  );
+
+  // Desktop 8192² PNG goes through IPC, not the HTTP server.
+  await desktopPage.locator('[data-testid="export-size-8192"]').click();
+  await desktopPage.locator('[data-testid="export-start"]').click();
+  await desktopPage.waitForSelector('[data-testid="export-result"]', { timeout: 20_000 });
+  const desktopPngResult = await desktopPage.evaluate(() => ({
+    text: document.querySelector('[data-testid="export-result"]')?.textContent ?? "",
+    calls: window.__desktopCalls.filter((call) => call[0] === "exportPng"),
+  }));
+  check(
+    "desktop 8192² PNG export runs through IPC and reports the saved path",
+    desktopPngResult.calls.some((call) => call[1] === 8192) &&
+      desktopPngResult.text.includes("/home/qa/docs/export-8192.png") &&
+      desktopPngResult.text.includes("桌面本地渲染，无需服务端"),
+    JSON.stringify(desktopPngResult),
+  );
+  await desktopPage.locator('[data-testid="export-dialog-close"]').click();
+  await sleep(150);
+
+  // Dirty tracking + window title, then native save clears dirty.
+  await desktopPage.locator('[data-testid="world-name"]').fill("QA 桌面世界");
+  await desktopPage.waitForFunction(
+    () =>
+      window.__desktopDocState?.dirty === true &&
+      window.__desktopDocState?.name === "QA 桌面世界",
+    undefined,
+    { timeout: 10_000, polling: 100 },
+  );
+  check(
+    "editing the world marks it dirty and pushes the title state",
+    (await desktopPage.locator('[data-testid="desktop-dirty"]').count()) === 1,
+  );
+  await desktopPage.evaluate(() => window.__desktopMenuHandler?.("save-world"));
+  await desktopPage.waitForFunction(() => window.__desktopDocState?.dirty === false, undefined, {
+    timeout: 10_000,
+    polling: 100,
+  });
+  const savedState = await desktopPage.evaluate(() => ({
+    state: window.__desktopDocState,
+    calls: window.__desktopCalls.filter((call) => call[0] === "saveWorld"),
+    dirtyBadge: document.querySelectorAll('[data-testid="desktop-dirty"]').length,
+  }));
+  check(
+    "menu save-world reuses the opened file path and clears the dirty marker",
+    savedState.state?.dirty === false &&
+      savedState.state?.name === "QA 桌面世界" &&
+      savedState.calls.length >= 1 &&
+      // The world was opened from a recent file: plain save overwrites that
+      // file instead of asking for a new path (no dialog).
+      savedState.calls[savedState.calls.length - 1][1] === "/home/qa/docs/harbor.atlas.json" &&
+      savedState.dirtyBadge === 0,
+    JSON.stringify(savedState),
+  );
+  await desktopPage.waitForFunction(() => window.__desktopDocState?.dirty === false, undefined, {
+    timeout: 10_000,
+    polling: 100,
+  });
+
+  // Drag & drop resolves File → path in the preload, then imports by path.
+  await desktopPage.evaluate(() => {
+    const documentClone = JSON.parse(JSON.stringify(window.__atlasDebug.getDocument()));
+    documentClone.seed = 424242;
+    documentClone.name = "拖入世界";
+    window.__desktopDropDoc = documentClone;
+    const transfer = new DataTransfer();
+    transfer.items.add(
+      new File([JSON.stringify(documentClone)], "dropped.atlas.json", {
+        type: "application/json",
+      }),
+    );
+    window.dispatchEvent(
+      new DragEvent("drop", { bubbles: true, cancelable: true, dataTransfer: transfer }),
+    );
+  });
+  await desktopPage.waitForFunction(
+    () => window.__atlasDebug.getDocument().seed === 424242,
+    undefined,
+    { timeout: 15_000, polling: 100 },
+  );
+  const dropState = await desktopPage.evaluate(() => ({
+    calls: window.__desktopCalls.filter((call) => call[0] === "readWorldFile"),
+    name: window.__atlasDebug.getDocument().name,
+    toast: document.querySelector('[data-testid="toast"]')?.textContent ?? "",
+  }));
+  check(
+    "drag & drop resolves the Electron file path and imports the world",
+    dropState.calls.some((call) => call[1] === "/home/qa/docs/dropped.atlas.json") &&
+      dropState.name === "拖入世界",
+    JSON.stringify(dropState),
+  );
+  await waitIdle(desktopPage);
+
+  // Native menu: export-svg preselects SVG and sends physical print size.
+  await desktopPage.evaluate(() => window.__desktopMenuHandler?.("export-svg"));
+  await desktopPage.waitForSelector('[data-testid="export-dialog"]', { timeout: 10_000 });
+  await desktopPage.waitForFunction(
+    () =>
+      document.querySelector('[data-testid="export-format-svg"]')?.getAttribute("aria-pressed") ===
+      "true",
+    undefined,
+    { timeout: 5_000, polling: 100 },
+  );
+  await desktopPage.locator('[data-testid="export-start"]').click();
+  await desktopPage.waitForSelector('[data-testid="export-result"]', { timeout: 20_000 });
+  const desktopSvgResult = await desktopPage.evaluate(() => ({
+    text: document.querySelector('[data-testid="export-result"]')?.textContent ?? "",
+    calls: window.__desktopCalls.filter((call) => call[0] === "exportSvg"),
+  }));
+  check(
+    "menu export-svg preselects SVG and exports via IPC with physical size",
+    desktopSvgResult.calls.length >= 1 &&
+      desktopSvgResult.calls[0][1] >= 1024 &&
+      typeof desktopSvgResult.calls[0][2] === "number" &&
+      desktopSvgResult.text.includes("桌面本地渲染，无需服务端"),
+    JSON.stringify(desktopSvgResult),
+  );
+  await desktopPage.locator('[data-testid="export-dialog-close"]').click();
+  await sleep(150);
+
+  // Native menu: 视图 → 地图装饰 expands and reveals the decorations group.
+  await desktopPage.evaluate(() => {
+    const group = document.querySelector('[data-testid="group-style-decorations"]');
+    if (group?.classList.contains("is-open")) {
+      group.querySelector(".panel-group-head")?.click();
+    }
+  });
+  await sleep(220);
+  await desktopPage.evaluate(() => window.__desktopMenuHandler?.("open-decorations"));
+  await sleep(400);
+  const decorationsState = await desktopPage.evaluate(() => {
+    const group = document.querySelector('[data-testid="group-style-decorations"]');
+    return {
+      open: group?.classList.contains("is-open") ?? false,
+      focused: group?.classList.contains("is-desktop-focus") ?? false,
+    };
+  });
+  check(
+    "menu open-decorations expands and highlights the decorations group",
+    decorationsState.open && decorationsState.focused,
+    JSON.stringify(decorationsState),
+  );
+
+  // Native menu: help.
+  await desktopPage.evaluate(() => window.__desktopMenuHandler?.("help"));
+  await desktopPage.waitForSelector('[data-testid="help-dialog"]', { timeout: 5_000 });
+  check(
+    "menu help opens the help dialog",
+    (await desktopPage.locator('[data-testid="help-dialog"]').count()) === 1,
+  );
+  await desktopPage.locator('[data-testid="help-close"]').click();
+  await desktopPage.screenshot({ path: join(OUT, "30-desktop-bridge.png") });
+  check(
+    "desktop renderer never calls /api/* (offline IPC exports only)",
+    desktopApiRequests.length === 0,
+    JSON.stringify(desktopApiRequests.slice(0, 5)),
+  );
+  await desktopContext.close();
+
   // ── report ─────────────────────────────────────────────────────────
   const report = {
     when: new Date().toISOString(),

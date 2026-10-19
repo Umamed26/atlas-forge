@@ -278,3 +278,23 @@ pnpm build
 | 回归 | ✅ core 82 tests、render 4 套测试、qa-ui 227/227、qa-gen-ux 20/20、qa-decor 14/14、qa-browser 全绿、qa:visual 4/4、qa:algo 9/9 | 见各套件输出 |
 
 **已知限制**：装饰位置为四角/上中/下中预设，不支持自由拖拽；SVG 文本仍是 `<text>`（印刷前建议转曲）。
+
+## 18. v0.7.0 Electron 桌面端（2026-10-19）
+
+**用户要求**：制作桌面端；子 agent 恢复可用后并行推进。范围确认：Electron + 未签名三平台安装包 + CI 产物；原生能力=文件/菜单/最近文件/拖拽 + 离线大图与矢量导出。
+
+| 项 | 结果 | 证据 |
+| --- | --- | --- |
+| 桌面壳 | ✅ `apps/desktop`（Electron 44.4.5），复用 core/render，不 fork | 打包产物 `app://atlas/index.html`、`isDesktop=true`、worker 首图 757ms |
+| 加载方式 | ✅ 特权 `app://` 协议（file:// 的 ESM/CORS 限制已规避），dev 用 Vite server | shell-dev 三模式实测（dev / unpacked / packaged），0 pageerror |
+| 安全基线 | ✅ contextIsolation+sandbox+nodeIntegration:false、preload 白名单、导航白名单、权限全拒、CSP 双保险 | shell-dev 安全清单；`require`/`process` 在 renderer 为 undefined |
+| 原生文件 | ✅ 系统菜单/快捷键、最近文件（含内容哈希）、原生打开/保存、拖拽 JSON、dirty 窗口标题 | web 243/243（新增 16 条桌面 stub 断言）；qa-desktop app-window/bridge 通过 |
+| 离线导出 | ✅ 主进程 1024–8192 PNG + SVG（A3@300dpi），串行锁/8192 内存保护 | qa-desktop `export-png-4096`（21MB, 9.5s）、`offline-export` 全过 |
+| 桌面 E2E | ✅ `scripts/qa-desktop.mjs`，Playwright `_electron` 对打包产物 | 15/15 通过（含 AppImage 解包产物）；截图 out/desktop-qa |
+| 打包 | ✅ 本机产出 AppImage + deb（未签名）；mac/win 由 CI 产出 | `AtlasForge-0.7.0-linux-x86_64.AppImage`、`.deb` |
+| CI | ✅ `.github/workflows/desktop.yml`：三平台 matrix 打包 + Linux packaged QA job | YAML 解析通过；artifact glob 见工作流 |
+| 文档 | ✅ `docs/desktop.md`（安装/运行/打包/未签名/离线边界/QA/排障）+ README 桌面端章节 | — |
+
+**本机限制**：GitHub 下载 Electron 很慢，打包时用本机缓存的同版本 dist（`--config.electronDist`）完成验证；该参数未写入仓库配置，CI 有网络走默认下载。mac/win 安装包只能在 CI 产出并验证。
+
+**已知限制**：未签名（mac 需去隔离属性、win SmartScreen）；无自动更新；主进程导出不可取消（8192 峰值 ~270MB）；最近文件无 push 刷新。

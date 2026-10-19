@@ -12,12 +12,19 @@
 import { createPipeline, type ProgressUpdate, type WorldDocument } from "@atlas/core";
 import { renderWorld, type Ctx2D } from "@atlas/render";
 
+interface WorkerFont {
+  url: string;
+  style: "normal" | "italic";
+}
+
 interface ExportRequest {
   type: "export";
   taskId: number;
   document: WorldDocument;
   size: number;
   simSize: number;
+  /** Absolute font URLs resolved by the main thread (file:// safe). */
+  fonts?: WorkerFont[];
 }
 
 const workerScope = self as unknown as {
@@ -28,26 +35,19 @@ const workerScope = self as unknown as {
 let lastProgressAt = 0;
 
 const WEB_FONT_FAMILY = "EB Garamond";
-const FONT_FILES: { file: string; style: "normal" | "italic" }[] = [
-  { file: "EBGaramond-Regular.ttf", style: "normal" },
-  { file: "EBGaramond-Italic.ttf", style: "italic" },
-];
 
 /**
  * Register the bundled render fonts for the worker's OffscreenCanvas so local
  * 1024/2048 PNG exports use the same typography as the preview and the Node
  * 4096² export. Silently falls back to the serif stack on failure.
  */
-async function ensureWorkerFonts(): Promise<boolean> {
-  const scope = self as unknown as {
-    fonts?: FontFaceSet;
-    location: { origin: string };
-  };
+async function ensureWorkerFonts(fonts?: WorkerFont[]): Promise<boolean> {
+  const scope = self as unknown as { fonts?: FontFaceSet };
   if (!scope.fonts || typeof FontFace === "undefined") return false;
+  if (!fonts || fonts.length === 0) return false;
   let loadedAny = false;
-  for (const { file, style } of FONT_FILES) {
+  for (const { url, style } of fonts) {
     try {
-      const url = new URL(`/fonts/${file}`, scope.location.origin).href;
       const face = new FontFace(WEB_FONT_FAMILY, `url("${url}")`, { style });
       await face.load();
       scope.fonts.add(face);
@@ -90,7 +90,7 @@ async function handleExport(request: ExportRequest): Promise<void> {
       });
       return;
     }
-    const fontsReady = await ensureWorkerFonts();
+    const fontsReady = await ensureWorkerFonts(request.fonts);
     const generatedAt = performance.now();
     const pipeline = createPipeline();
     const layers = pipeline.generate({

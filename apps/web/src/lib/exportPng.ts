@@ -10,7 +10,7 @@ import {
 } from "@atlas/core";
 
 import { renderMapToCanvas, canvasToBlob } from "./renderMap";
-import { slugify } from "./utils";
+import { publicAssetUrl, slugify } from "./utils";
 
 export type ExportErrorKind =
   | "network"
@@ -110,6 +110,24 @@ type WorkerReply = WorkerDoneMessage | WorkerErrorMessage | WorkerProgressMessag
 
 let exportTaskCounter = 0;
 
+/** Worker-side typography: resolve the same public fonts the preview uses. */
+const WORKER_FONT_FILES: { file: string; style: "normal" | "italic" }[] = [
+  { file: "EBGaramond-Regular.ttf", style: "normal" },
+  { file: "EBGaramond-Italic.ttf", style: "italic" },
+];
+
+function workerFontUrls(): { url: string; style: "normal" | "italic" }[] {
+  try {
+    return WORKER_FONT_FILES.map(({ file, style }) => ({
+      url: publicAssetUrl(`fonts/${file}`),
+      style,
+    }));
+  } catch {
+    // Path resolution must never block an export; the worker falls back to serif.
+    return [];
+  }
+}
+
 function exportWithWorker(
   document: WorldDocument,
   size: number,
@@ -207,6 +225,9 @@ function exportWithWorker(
       document,
       size,
       simSize: localSimSize(document),
+      // The worker has no reliable document base under file://, so resolve the
+      // font URLs here (main thread) and pass them across.
+      fonts: workerFontUrls(),
     });
   });
 }

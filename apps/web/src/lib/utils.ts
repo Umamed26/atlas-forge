@@ -47,6 +47,29 @@ export function uid(prefix: string): string {
   return `${prefix}-${Date.now().toString(36)}-${idCounter.toString(36)}`;
 }
 
+/**
+ * Resolve a file shipped under Vite's `public/` directory.
+ *
+ * Uses `import.meta.env.BASE_URL` instead of the site root so it keeps working
+ * in packaged Electron builds loaded from `file://` (where `location.origin`
+ * is "null" and absolute `/fonts/...` URLs point at the filesystem root).
+ */
+export function publicAssetUrl(path: string): string {
+  const base = import.meta.env.BASE_URL || "/";
+  const clean = path.replace(/^\/+/, "");
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(base)) {
+    return new URL(clean, base.endsWith("/") ? base : `${base}/`).href;
+  }
+  const baseWithSlash = base.endsWith("/") ? base : `${base}/`;
+  const documentBase =
+    typeof document !== "undefined" && document.baseURI
+      ? document.baseURI
+      : typeof window !== "undefined"
+        ? window.location.href
+        : baseWithSlash;
+  return new URL(`${baseWithSlash}${clean}`, documentBase).href;
+}
+
 /** Turn a world name into a filesystem-friendly slug (keeps CJK characters). */
 export function slugify(name: string): string {
   const cleaned = name

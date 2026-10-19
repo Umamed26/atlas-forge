@@ -1,6 +1,6 @@
 {
   "name": "atlas-forge",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -15,7 +15,13 @@
     "qa:baseline": "tsx scripts/visual-baseline.ts",
     "qa:visual": "tsx scripts/visual-compare.ts",
     "qa:algo": "tsx scripts/qa-algo.ts",
-    "qa:decor": "node scripts/qa-decor.mjs"
+    "qa:decor": "node scripts/qa-decor.mjs",
+    "desktop:dev": "pnpm -C apps/desktop run dev",
+    "desktop:build": "pnpm -C apps/web run build && pnpm -C apps/desktop run build",
+    "desktop:pack": "pnpm desktop:build && pnpm -C apps/desktop run pack",
+    "desktop:dist": "pnpm desktop:build && pnpm -C apps/desktop run dist",
+    "desktop:typecheck": "pnpm -C apps/desktop run typecheck",
+    "qa:desktop": "node scripts/qa-desktop.mjs"
   },
   "devDependencies": {
     "@atlas/core": "workspace:*",
@@ -23,6 +29,8 @@
     "@napi-rs/canvas": "^0.1.60",
     "@types/node": "^24.0.0",
     "concurrently": "^9.1.0",
+    "electron": "44.4.5",
+    "electron-builder": "^26.15.3",
     "playwright-core": "^1.64.1",
     "tsx": "^4.19.0",
     "typescript": "^5.7.0"

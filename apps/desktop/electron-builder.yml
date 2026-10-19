@@ -1,0 +1,68 @@
+# electron-builder configuration for Atlas Forge desktop (v0.7).
+#
+# All three platform builds are intentionally UNSIGNED: no developer certificate is
+# configured, so macOS ships a dmg/zip that needs `xattr -dr com.apple.quarantine` and
+# Windows shows a SmartScreen prompt. Publishing is disabled by passing `--publish never`
+# on the CLI (see the NOTE below); CI only uploads build artifacts.
+#
+# Build inputs: `pnpm desktop:build` writes the bundled main process, preload and the
+# copied renderer into apps/desktop/dist, then electron-builder packs that directory.
+appId: com.umamed.atlasforge
+productName: Atlas Forge
+copyright: Copyright © 2026 Umamed
+electronVersion: 44.4.5
+
+directories:
+  # Build output and final packages both live under apps/desktop/dist (the `files`
+  # globs below only pick the bundled app, never the generated installers).
+  output: dist
+  buildResources: build
+
+files:
+  - dist/main/**/*
+  - dist/preload/**/*
+  - dist/renderer/**/*
+  - dist/assets/**/*
+  - package.json
+
+asar: true
+# @napi-rs/canvas ships prebuilt N-API binaries; they must stay outside the asar.
+asarUnpack:
+  - "**/*.node"
+  - "node_modules/@napi-rs/**"
+
+# Prebuilt N-API modules do not need an electron-rebuild pass (which would also
+# require a full C++ toolchain on every CI runner).
+npmRebuild: false
+
+# NOTE: no `publish` provider block here — electron-builder >= 26 treats a
+# `publish: never` config value as a provider name and fails with
+# "Cannot find module for publisher never". Publishing is disabled by passing
+# `--publish never` on the CLI (see package.json scripts and CI).
+artifactName: "AtlasForge-${version}-${os}-${arch}.${ext}"
+
+mac:
+  category: public.app-category.graphics-design
+  target:
+    - dmg
+    - zip
+  # Unsigned build: never look for a signing identity.
+  identity: null
+  hardenedRuntime: false
+  gatekeeperAssess: false
+
+win:
+  target:
+    - nsis
+    - portable
+  # No certificate configured: unsigned installer + portable exe.
+
+linux:
+  target:
+    - AppImage
+    - deb
+  category: Graphics
+  synopsis: Atlas Forge — offline fantasy map generator
+  maintainer: Umamed <dev@umamed.example>
+  # Deterministic unpacked binary name used by the desktop QA script.
+  executableName: atlas-forge

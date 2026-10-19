@@ -1,5 +1,6 @@
 /** First-run scenario picker (10 seconds to a good-looking map). */
 import type { ScenarioPreset } from "../lib/scenarios";
+import { publicAssetUrl } from "../lib/utils";
 
 export interface WelcomePanelProps {
   open: boolean;
@@ -47,7 +48,7 @@ export function WelcomePanel({
               >
                 <img
                   className="preset-thumb-img"
-                  src={`/presets/${scenario.id}.png`}
+                  src={publicAssetUrl(`presets/${scenario.id}.png`)}
                   alt=""
                   loading="lazy"
                   draggable={false}

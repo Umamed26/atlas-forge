@@ -7,6 +7,8 @@
  *
  * Any failure is silent: the renderer falls back to the serif stack.
  */
+import { publicAssetUrl } from "./utils";
+
 export const RENDER_FONT_FAMILY = "EB Garamond";
 
 const FONT_FILES: { file: string; style: "normal" | "italic" }[] = [
@@ -25,7 +27,7 @@ async function loadFonts(): Promise<boolean> {
   await Promise.all(
     FONT_FILES.map(async ({ file, style }) => {
       try {
-        const url = new URL(`/fonts/${file}`, window.location.origin).href;
+        const url = publicAssetUrl(`fonts/${file}`);
         const face = new FontFace(RENDER_FONT_FAMILY, `url("${url}")`, { style });
         await face.load();
         fontSet.add(face);

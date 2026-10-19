@@ -3,6 +3,7 @@ packages:
   - "packages/*"
 
 allowBuilds:
+  electron-winstaller: true
   esbuild: true
 
 onlyBuiltDependencies:

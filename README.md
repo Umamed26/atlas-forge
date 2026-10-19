@@ -43,6 +43,24 @@
 
 ![同源文字包围盒命中](examples/hit-testing.jpg)
 
+## 桌面端（Electron，v0.7）
+
+![桌面端](examples/desktop-app.jpg)
+
+同一个编辑器，打包成可离线运行的桌面应用（Windows / macOS / Linux）：
+
+```bash
+pnpm install
+pnpm desktop:dev      # 开发模式：Electron + Vite dev server
+pnpm desktop:dist     # 打三平台安装包（未签名）到 apps/desktop/dist
+```
+
+- **完全离线**：生成、编辑、导出都不需要网络；4096/8192 PNG 与 SVG 由主进程用同一套 `@atlas/core` + `@atlas/render` 本地渲染，不再依赖 Node 导出服务。
+- **原生文件**：系统菜单与快捷键（新建/打开/最近文件/保存/另存为/导出/装饰）、原生打开与保存对话框、拖拽 JSON 进窗口直接导入、窗口标题显示未保存状态。
+- **安全基线**：`contextIsolation` + `sandbox` + `nodeIntegration:false`；渲染进程只能通过 preload 暴露的白名单 IPC 访问文件系统；生产环境用特权 `app://` 协议加载（避免 file:// 的 ESM/CORS 限制），CSP 同时写在响应头与构建期 meta；权限请求默认拒绝。
+- **未签名发布**：CI 产出三平台未签名安装包（mac dmg/zip、win nsis/portable、linux AppImage/deb）。macOS 需 `xattr -dr com.apple.quarantine "/Applications/Atlas Forge.app"`，Windows 会弹 SmartScreen 提示。
+- 数据位置：世界文件由你指定路径保存；应用配置与最近文件在系统 userData 目录。
+
 ## 快速开始
 
 环境：Node.js ≥ 20（开发用 Node 24）、pnpm ≥ 9。首次安装依赖后一条命令启动：
@@ -135,7 +153,8 @@ pnpm qa:baseline      # 重建渲染视觉基线（固定合成地形，与算�
 pnpm qa:browser       # Playwright E2E：生成/调参/画笔/地点编辑/命中/导入失败/存档恢复/导出，截图到 out/e2e/
 node apps/web/scripts/qa-ui.mjs   # 200 项 UI 交互断言（需 dev server）
 node scripts/qa-gen-ux.mjs        # 20 项生成体验断言：首屏/锁定重掷/历史/草稿/可读性
-pnpm qa:visual        # 8 条视觉回归基准（场景预设 × 固定 seed）
+pnpm qa:visual        # 视觉回归基准（固定合成地形 fixture）
+pnpm qa:desktop       # 桌面端打包产物 E2E（Playwright _electron，含离线/导出）
 ```
 
 实测（本机，2026-10）：
@@ -161,6 +180,9 @@ pnpm qa:visual        # 8 条视觉回归基准（场景预设 × 固定 seed）
 - 本地自动保存仅保留「当前 + 上一份备份」两个槽位；恢复会先清理损坏主档再写回。
 - 取消服务端导出会产生一次浏览器 `net::ERR_ABORTED`（预期行为）。
 - 桌面优先：窄屏（≥1024）保证不溢出、按钮可点，但未承诺触控拖动/双击改名。
+- 桌面端安装包**未签名**：macOS 需手动去除隔离属性，Windows 会触发 SmartScreen；自动更新未实现。
+- 桌面端的大图导出在主进程串行执行，导出期间不可取消（8192² 峰值约 270MB）。
+- 本地验证限制：本机无法从 GitHub 下载 Electron 二进制，打包验证使用了本机缓存的同版本 dist；三平台安装包由 CI 产出。
 - **板块地形为实验性可选模型**：山系/裂谷按板块边界生成，但海岸与山带细节仍不及默认 fBm 地形，暂不作为默认；一键切换后可撤销。
 - SVG 目前为「分层矢量地图」：文字仍是 `<text>`（依赖查看端字体），尚未做字体子集化与裁切路径；印刷前建议在 Inkscape/Illustrator 转曲。
 - 8192² 为显式 opt-in + 内存预检，未在低内存机器上压测。

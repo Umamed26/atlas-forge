@@ -1,5 +1,28 @@
 # Changelog
 
+## v0.7.0 — 2026-10-19
+
+主题：**Electron 桌面端（离线可用、原生文件与菜单、本地大图/矢量导出）。**
+
+### Added
+- **桌面壳 `apps/desktop`**：Electron 44，复用 `packages/core` / `packages/render`（不 fork 渲染）。
+  - 生产环境通过特权 `app://` 协议加载 Vite 产物（规避 file:// 的 ESM/CORS 限制），dev 仍加载 Vite dev server。
+  - 安全基线：contextIsolation + sandbox + nodeIntegration:false、preload 白名单 IPC、导航白名单、windowOpenHandler→openExternal、权限请求默认拒绝、CSP 响应头 + 构建期 meta。
+- **原生文件能力**：系统菜单与快捷键（新建/打开/最近文件/保存/另存为/导出 PNG·SVG/装饰/帮助）、原生打开与保存对话框、拖拽 JSON 导入、窗口标题未保存标记、最近文件列表（带内容哈希）。
+- **离线大图与矢量导出**：主进程用 `@napi-rs/canvas` + 共享渲染器导出 1024–8192 PNG 与 SVG（含 A3@300dpi 物理尺寸），无需 HTTP 服务；导出串行锁、8192 内存保护、canvas 释放。
+- **桌面 E2E**：`scripts/qa-desktop.mjs` 用 Playwright `_electron` 对**打包产物**跑 14 项断言（首屏生成、canvas、装饰开关在导出中生效、4096 PNG、**断网后仍能生成与导出**、console/主进程干净），截图与报告到 `out/desktop-qa/`。
+- **CI**：新增 `.github/workflows/desktop.yml`，三平台（ubuntu/macos/windows）matrix 产出未签名安装包 artifact，并在 Linux 上追加 packaged QA job。
+- 文档：新增 `docs/desktop.md`（安装/运行/打包/未签名说明/离线边界/QA 与故障排查）。
+
+### Changed
+- `apps/web`：桌面端顶栏显示 打开/最近/保存/另存为；导出弹窗在桌面端提供 1024–8192 PNG 与 SVG（IPC）；桌面端跳过 `/api/*` 探针并把状态显示为「桌面端 · 本地渲染」；桌面产物启用只读 `__atlasDebug`；修复 file:///app:// 下字体与预设图标的绝对路径。
+- 桌面包依赖归类：`@atlas/core`/`@atlas/render` 由主进程 esbuild 打包，`@napi-rs/canvas` 保留为运行时依赖并 asarUnpack。
+
+### Fixed
+- `electron-builder.yml` 中非法的 `publish: never` 配置（被当成 publisher 名导致打包失败）。
+- Electron `path.txt` 内容错误导致 `require('electron')` 触发重新下载。
+- 打包产物中 SVG 导出因 XML prolog 判定失败的问题。
+
 ## v0.6.0 — 2026-10-19
 
 主题：**地图上所有装饰元素可配置 + 成图排版对齐 + 海岸线质量再提升。**

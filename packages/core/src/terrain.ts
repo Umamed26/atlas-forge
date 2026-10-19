@@ -92,10 +92,6 @@ export function generateTerrain(
   }
 
   normalizeHeight(height, size);
-  // Fractal coastline detail: both plate and modern fBm worlds get multi-scale
-  // coastal jitter (a raw fBm coast measures ~1.0 on the box-counting dimension,
-  // which reads as a smooth polygon rather than a coastline).
-  if (model === "plates" || modernTerrain) roughenCoast(height, size, seed);
   const erosionIterations = clamp(Math.round(params.erosionIterations), 0, 200);
   if (erosionIterations > 0) {
     const thermalPasses = Math.min(2, Math.max(1, Math.round(erosionIterations / 60)));
@@ -116,6 +112,11 @@ export function generateTerrain(
     // (the plate model's raw distribution drifts a few points otherwise).
     calibrateLandFraction(height, size, params.seaLevel, 0.40);
   }
+
+  // Fractal coastline detail runs LAST on purpose: hydraulic/thermal erosion
+  // smooths any sub-cell jitter, so roughening before it left coasts looking
+  // like smooth polygons (box dimension ~1.10 instead of 1.2+).
+  if (model === "plates" || modernTerrain) roughenCoast(height, size, seed);
 
   if (modernTerrain) {
     // Interior basins that sit below sea level would either flood as giant
@@ -413,30 +414,47 @@ function buildPlateHeight(
  * coastlines without changing the overall composition.
  */
 function roughenCoast(height: Float32Array, size: number, seed: number): void {
+  // Two-scale domain warp applied to the perturbation coordinates: straight
+  // fBm jitter produces rounded blobs, whereas warped noise carves inlets,
+  // headlands and offshore islets (the box-counting dimension rises from
+  // ~1.10 to 1.2+ while the macro shape is preserved).
+  const warpRes = fieldRes(size, 256);
+  const warpX = buildField(warpRes, (u, v) => fbm(u * 4.7 + 2.3, v * 4.7 + 8.9, seed + 1451, 3) - 0.5);
+  const warpY = buildField(warpRes, (u, v) => fbm(u * 4.7 + 6.1, v * 4.7 + 1.7, seed + 1471, 3) - 0.5);
+
   const macroRes = fieldRes(size, 512);
   const macro = buildField(macroRes, (u, v) => fbm(u * 11 + 3.1, v * 11 + 7.7, seed + 1501, 3) - 0.5);
   const midRes = fieldRes(size, 512);
-  const mid = buildField(midRes, (u, v) => fbm(u * 29 + 5.9, v * 29 + 2.3, seed + 1551, 3) - 0.5);
+  const mid = buildField(midRes, (u, v) => fbm(u * 29 + 5.9, v * 29 + 2.3, seed + 1551, 4) - 0.5);
   const microRes = fieldRes(size, 512);
-  const micro = buildField(microRes, (u, v) => fbm(u * 73 + 1.3, v * 73 + 9.1, seed + 1601, 2) - 0.5);
+  const micro = buildField(microRes, (u, v) => fbm(u * 73 + 1.3, v * 73 + 9.1, seed + 1601, 3) - 0.5);
+  const fineRes = fieldRes(size, 512);
+  const fine = buildField(fineRes, (u, v) => fbm(u * 151 + 4.9, v * 151 + 6.3, seed + 1661, 2) - 0.5);
+
   const inv = 1 / size;
+  const warpAmp = 0.02;
   for (let y = 0; y < size; y += 1) {
     const v = (y + 0.5) * inv;
     const row = y * size;
     for (let x = 0; x < size; x += 1) {
       const u = (x + 0.5) * inv;
       const h = height[row + x];
-      // Stronger near the typical waterline so the coastline gets the detail.
-      const band = 0.55 + 0.45 * Math.exp(-(((h - 0.42) / 0.14) ** 2));
+      // Only the coastal band gets the full perturbation; deep interior and
+      // open ocean are left alone so relief and sea-floor stay intact.
+      const dist = Math.abs(h - 0.42);
+      if (dist > 0.22) continue;
+      const band = Math.exp(-((dist / 0.13) ** 2));
+      const wu = u + sampleField(warpX, warpRes, u, v) * warpAmp;
+      const wv = v + sampleField(warpY, warpRes, u, v) * warpAmp;
       const jag =
-        sampleField(macro, macroRes, u, v) * 0.11 +
-        sampleField(mid, midRes, u, v) * 0.055 +
-        sampleField(micro, microRes, u, v) * 0.028;
+        sampleField(macro, macroRes, wu, wv) * 0.095 +
+        sampleField(mid, midRes, wu, wv) * 0.075 +
+        sampleField(micro, microRes, wu, wv) * 0.058 +
+        sampleField(fine, fineRes, u, v) * 0.042;
       height[row + x] = clamp01(h + jag * band);
     }
   }
 }
-
 
 /**
  * Cheap pit filling: repeatedly raise a cell that is a strict local minimum to

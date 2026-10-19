@@ -10,7 +10,7 @@
   },
   "scripts": {
     "typecheck": "tsc -p tsconfig.json",
-    "test": "tsx test/synthetic.test.ts && tsx test/readability.test.ts && tsx test/svg.test.ts"
+    "test": "tsx test/synthetic.test.ts && tsx test/readability.test.ts && tsx test/svg.test.ts && tsx test/decorations.test.ts"
   },
   "dependencies": {
     "@atlas/core": "workspace:*"

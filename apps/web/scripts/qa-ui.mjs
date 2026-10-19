@@ -125,6 +125,46 @@ async function clickCanvas(page, normalized) {
   );
 }
 
+
+/** Convert a normalized world point to page coordinates via the live view. */
+async function pagePointForWorld(page, wx, wy) {
+  const view = (await summary(page)).view;
+  const box = await page.locator('[data-testid="map-canvas"]').boundingBox();
+  return {
+    x: box.x + view.offsetX + wx * view.baseSize * view.scale,
+    y: box.y + view.offsetY + wy * view.baseSize * view.scale,
+  };
+}
+
+/**
+ * Pick a normalized world point not covered by existing place boxes and away
+ * from the map chrome, so a newly added long label is actually drawn (the
+ * layout legitimately skips labels that collide with labels or decorations).
+ */
+async function findFreeWorldPoint(page) {
+  const boxes = await page.evaluate(() => window.__atlasDebug.getPlaceHitBoxes());
+  const view = (await summary(page)).view;
+  for (let gy = 0.25; gy <= 0.75; gy += 0.05) {
+    for (let gx = 0.2; gx <= 0.8; gx += 0.05) {
+      const wx = gx + ((Math.round(gy * 100) * 37) % 7) * 0.004;
+      const screenX = view.offsetX + wx * view.baseSize * view.scale;
+      const screenY = view.offsetY + gy * view.baseSize * view.scale;
+      const free = boxes.every((box) => {
+        const b = box.screen;
+        const pad = 28;
+        return (
+          screenX < b.x - pad ||
+          screenX > b.x + b.width + pad ||
+          screenY < b.y - pad ||
+          screenY > b.y + b.height + pad
+        );
+      });
+      if (free) return [wx, gy];
+    }
+  }
+  return [0.5, 0.5];
+}
+
 async function placeMarkerScreen(page, placeId) {
   return page.evaluate((id) => {
     const data = window.__atlasDebug.getSummary();
@@ -1068,7 +1108,9 @@ async function main() {
   await page.locator('[data-testid="place-kind-select"]').selectOption("custom");
   await page.locator('[data-testid="place-name-input"]').fill("极长测试标注名称");
   await page.locator('[data-testid="place-add"]').click();
-  await clickCanvas(page, [0.62, 0.32]);
+  const freeSpot = await findFreeWorldPoint(page);
+  const spotPoint = await pagePointForWorld(page, freeSpot[0], freeSpot[1]);
+  await page.mouse.click(spotPoint.x, spotPoint.y);
   await waitIdle(page);
   await page.waitForFunction(
     () => {

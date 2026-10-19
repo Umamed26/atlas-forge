@@ -260,3 +260,21 @@ pnpm build
 | 诊断面板 | ✅ 地形/水文/气候/群系/性能 + 气候叠加 | qa-ui 227/227；截图 30-algorithm-badge |
 
 **取舍说明**：板块地形没有作为默认——它在成因上正确，但视觉质量（海岸/山带细节）仍不及已验证的 fBm 骨架；按「不把退化当升级」的原则，默认保留 fBm + 现代气候/河网管线，板块作为可选项并在文档中标注实验性。
+
+## 17. v0.6.0 装饰可配置 + 排版对齐 + 海岸线（2026-10-19）
+
+**用户三项要求**：①所有地图元素可配置/关闭 ②继续优化算法 ③文字对齐。范围确认：装饰含 7 个元素 + 四角位置预设（不做自由拖拽）；文字对齐成图与界面都做。
+
+| 项 | 结果 | 证据 |
+| --- | --- | --- |
+| 装饰契约 | ✅ `style.decorations` 7 个稳定 id（title/compass/scaleBar/legend/graticule/border/credits），含 visible/anchor/text/subtitle；旧 show* 布尔自动迁移 | core normalize 迁移测试（旧文档 showCompass=false 正确映射）；`DEFAULT_DECORATIONS` |
+| 单一装饰树 | ✅ canvas 与 SVG 共用 `computeChromeLayout`（安全区、锚点、避让、碰撞下推） | `decorations.test.ts` 12 项；SVG `data-decor` 节点对账 |
+| 关闭不留位 | ✅ 隐藏元素零尺寸、不进避让；SVG 不输出节点；全关即干净底图 | 全关 PNG/SVG 各一份；E2E「全关导出无 chrome 节点」 |
+| 四角锚点 | ✅ 6 个锚点可选，宽标题会把角落元素自动下推 | 单元测试锚点位移 + 互不重叠；E2E legend 换到左上 |
+| 文案可改 | ✅ 主标题/副标题/署名可编辑，实时重绘不重算世界 | E2E：改文案后导出 SVG 含新文本；`generation.seq` 不变 |
+| 成图文字对齐 | ✅ 标题按安全区中心（左右留白差 ≤1px）、元素两两不重叠、SVG 用 text-anchor + 显式基线 | `decorations.test.ts` 断言；SVG 检查 |
+| 界面文字对齐 | ✅ 参数数值列右对齐、开关文字与控件同轴、弹窗 padding 统一 CSS 变量、地点列表列对齐 | `scripts/qa-decor.mjs` 数值断言（右边缘差 ≤1px、中心轴差 ≤1px） |
+| 算法·海岸线 | ✅ 域扭曲 + 4 倍频、并移到侵蚀之后；盒计数维数 p50 1.14→**1.19**、min 1.09→**1.14**（120 seed） | `qa-algo --full` 9/9；分形指标门禁阈值提高到 min≥1.12/p50≥1.18 |
+| 回归 | ✅ core 82 tests、render 4 套测试、qa-ui 227/227、qa-gen-ux 20/20、qa-decor 14/14、qa-browser 全绿、qa:visual 4/4、qa:algo 9/9 | 见各套件输出 |
+
+**已知限制**：装饰位置为四角/上中/下中预设，不支持自由拖拽；SVG 文本仍是 `<text>`（印刷前建议转曲）。

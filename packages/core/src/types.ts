@@ -118,6 +118,48 @@ export interface WorldParams {
   tectonicPlates?: number;
 }
 
+/** Where a decoration is anchored inside the printable safe area. */
+export type DecorAnchor =
+  | "top-left"
+  | "top-center"
+  | "top-right"
+  | "bottom-left"
+  | "bottom-center"
+  | "bottom-right";
+
+/** Stable ids for every configurable map element. */
+export type DecorId =
+  | "title"
+  | "compass"
+  | "scaleBar"
+  | "legend"
+  | "graticule"
+  | "border"
+  | "credits";
+
+export interface DecorConfig {
+  visible: boolean;
+  /** Anchor inside the safe area (frames/graticule ignore it). */
+  anchor?: DecorAnchor;
+  /** Optional text override (title / subtitle / credits). */
+  text?: string;
+  /** Secondary line (title subtitle, credits fine print). */
+  subtitle?: string;
+}
+
+/**
+ * Per-element configuration for every decoration drawn on the map.
+ *
+ * `RenderStyle.decorations` is the single source of truth for map chrome: the
+ * canvas preview, the PNG export, the SVG export and the print pipeline all
+ * consume this same tree (visibility + anchor + text), so a hidden element
+ * leaves no space and no node in the SVG.
+ *
+ * Missing entries fall back to DEFAULT_DECORATIONS; documents written before
+ * v0.6 are migrated from the legacy `showCompass` / `showLegend` booleans.
+ */
+export type Decorations = Partial<Record<DecorId, DecorConfig>>;
+
 export interface RenderStyle {
   preset: "parchment-classic" | "aged-ink";
   title: string;
@@ -135,6 +177,11 @@ export interface RenderStyle {
   hillshadeStrength: number;
   /** 0..1 coastline hatching */
   coastHatching: number;
+  /**
+   * Per-element map chrome configuration (v0.6). When present it takes
+   * precedence over the legacy show* booleans above.
+   */
+  decorations?: Decorations;
 }
 
 // ── Overrides: all coordinates are normalized world space [0,1] ───────────

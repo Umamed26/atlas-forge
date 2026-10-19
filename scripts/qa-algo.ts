@@ -300,9 +300,9 @@ const checks: { name: string; ok: boolean; detail: string }[] = [
   },
   {
     name: "coastline is fractal (box dimension)",
-    // A smooth/polygonal coast measures ~1.00; real generated coastlines sit
-    // around 1.05-1.20 at these scales.
-    ok: minCoast >= 1.03 && percentile(reports.map((r) => r.coastDimension), 0.5) >= 1.06,
+    // A smooth/polygonal coast measures ~1.00. v0.6 targets real-world coastal
+    // roughness (domain-warped multi-octave detail after erosion).
+    ok: minCoast >= 1.12 && percentile(reports.map((r) => r.coastDimension), 0.5) >= 1.18,
     detail: `min=${minCoast.toFixed(2)} p50=${percentile(reports.map((r) => r.coastDimension), 0.5).toFixed(2)}`,
   },
   {

@@ -19,6 +19,7 @@ import { extractRivers, type RiverPath } from "./hydro";
 import { layoutMapLabels, type LaidItem, type LaidMarker, type LaidText, type MeasuredLabel } from "./labels";
 import { sampleScalar } from "./sampling";
 import { cssRgb, resolveTheme, type Quality, type RenderTheme, type RGB } from "./style";
+import { computeChromeLayout } from "./chrome";
 import { RENDERER_VERSION } from "./version";
 
 export type SvgPage = "A4" | "A3" | "A2" | "LETTER";
@@ -370,6 +371,10 @@ interface SvgDecorPlan {
   subtitleSize: number;
   titleTracking: number;
   avoid: Array<{ x: number; y: number; w: number; h: number }>;
+  border: boolean;
+  graticule: boolean;
+  titleVisible: boolean;
+  credits: { rect: { x: number; y: number; w: number; h: number }; text: string; size: number } | null;
 }
 
 function planSvgDecor(
@@ -379,69 +384,37 @@ function planSvgDecor(
   scale: number,
   theme: RenderTheme,
 ): SvgDecorPlan {
-  const style = document.style;
-  const m1 = (style.showBorder ? theme.decor.frameInset : 6) * scale;
-  const m2 = (style.showBorder ? theme.decor.frameInnerInset : 10) * scale;
-  const m3 = (style.showBorder ? theme.decor.innerRuleInset : 14) * scale;
-  const title = (style.title || document.name || "Untitled World").trim() || "Untitled World";
-  const cjk = /[\u2e80-\u9fff]/.test(title);
-  const titleSize0 = theme.decor.titleScale * scale;
-  const subtitleSize = theme.decor.subtitleScale * scale;
-  const pad = 12 * scale;
-  const titleText = cjk ? title : title.toUpperCase();
-  let titleSize = titleSize0;
-  let tracking = (cjk ? 0.2 : 0.14) * titleSize;
-  const measureTitle = (t: string, s: number, tr: number): number =>
-    estimateTextWidth(t, textFont(t, s, false)) + Math.max(0, Array.from(t).length - 1) * tr;
-  let titleW = measureTitle(titleText, titleSize, tracking);
-  const maxCartoucheW = Math.min(width * 0.58, width - m3 * 2 - 12 * scale);
-  const maxTextW = maxCartoucheW - pad * 2;
-  for (let i = 0; i < 8 && titleW > maxTextW; i += 1) {
-    titleSize *= 0.92;
-    tracking = (cjk ? 0.2 : 0.14) * titleSize;
-    titleW = measureTitle(titleText, titleSize, tracking);
-  }
-  const cartoucheW = Math.max(width * 0.34, titleW + pad * 2.2);
-  const cartoucheH = titleSize * 1.55 + subtitleSize * 1.9 + pad * 1.3;
-  const cartouche = { x: (width - cartoucheW) / 2, y: m1 * 0.55, w: cartoucheW, h: cartoucheH };
-  const compassRadius = theme.decor.compassRadius * scale;
-  const compass = style.showCompass
-    ? {
-        cx: width - m3 - compassRadius * 1.12,
-        cy: m3 + compassRadius * 1.12,
-        r: compassRadius,
-      }
-    : null;
-  const legendW = Math.min(width * 0.215, 260 * scale);
-  const rowH = 18 * scale;
-  const legendH = 20 * scale + rowH * 4 + 12 * scale;
-  const legend = style.showLegend
-    ? { x: width - m3 - legendW, y: height - m3 - legendH, w: legendW, h: legendH }
-    : null;
-  const scaleW = Math.min(theme.decor.scaleWidth * scale, width * 0.25);
-  const scaleH = theme.decor.scaleHeight * scale;
-  const scaleBar = style.showLegend
-    ? { x: m3 + 10 * scale, y: height - m3 - 24 * scale, w: scaleW, h: scaleH }
-    : null;
-  const avoid = [cartouche];
-  if (compass) avoid.push({ x: compass.cx - compass.r, y: compass.cy - compass.r, w: compass.r * 2, h: compass.r * 2 });
-  if (legend) avoid.push(legend);
-  if (scaleBar) avoid.push({ x: scaleBar.x - scale, y: scaleBar.y - scale, w: scaleBar.w + 2 * scale, h: scaleBar.h + 2 * scale });
+  const chrome = computeChromeLayout({
+    document,
+    width,
+    height,
+    scale,
+    theme,
+    // SVG has no canvas: estimate with the same EB Garamond metrics the
+    // rasteriser uses. Anchored/centred elements still agree because both
+    // renderers place them from this identical layout object.
+    measure: (text, font, tracking) =>
+      estimateTextWidth(text, font) + Math.max(0, Array.from(text).length - 1) * tracking,
+  });
   return {
-    m1,
-    m2,
-    m3,
-    cartouche,
-    compass,
-    scaleBar,
-    legend,
-    title: titleText,
-    subtitle: cjk ? "寰 宇 图 志" : "A CHART OF THE KNOWN WORLD",
-    footer: cjk ? `寰宇工坊 · 种子 ${document.seed}` : `ATLAS FORGE · SEED ${document.seed}`,
-    titleSize,
-    subtitleSize,
-    titleTracking: tracking,
-    avoid,
+    m1: chrome.m1,
+    m2: chrome.m2,
+    m3: chrome.m3,
+    cartouche: chrome.title.rect,
+    compass: chrome.compass,
+    scaleBar: chrome.scaleBar,
+    legend: chrome.legend,
+    title: chrome.title.text,
+    subtitle: chrome.title.subtitle,
+    footer: chrome.title.footer,
+    titleSize: chrome.title.size,
+    subtitleSize: chrome.title.subtitleSize,
+    titleTracking: chrome.title.tracking,
+    avoid: chrome.avoid,
+    border: chrome.border,
+    graticule: chrome.graticule,
+    titleVisible: chrome.title.visible,
+    credits: chrome.credits,
   };
 }
 
@@ -464,7 +437,7 @@ function svgDecor(plan: SvgDecorPlan, width: number, height: number, scale: numb
   const border = rgb(theme.ink.border);
   const ink = rgb(theme.ink.main);
   // Frame rules + corner diamonds.
-  if (theme.preset) {
+  if (plan.border) {
     parts.push(
       `<rect x="${fmt(plan.m1)}" y="${fmt(plan.m1)}" width="${fmt(width - plan.m1 * 2)}" height="${fmt(height - plan.m1 * 2)}" fill="none" stroke="${border}" stroke-opacity="0.92" stroke-width="${fmt(theme.decor.frameThickness * scale)}"/>`,
     );
@@ -503,6 +476,8 @@ function svgDecor(plan: SvgDecorPlan, width: number, height: number, scale: numb
     }
   }
   // Cartouche.
+  if (plan.titleVisible) {
+  parts.push(`<g id="cartouche" data-decor="title">`);
   const c = plan.cartouche;
   const pad = 12 * scale;
   parts.push(
@@ -523,10 +498,12 @@ function svgDecor(plan: SvgDecorPlan, width: number, height: number, scale: numb
   parts.push(
     `<text x="${fmt(width / 2)}" y="${fmt(c.y + c.h * 0.87)}" font-family="EB Garamond, serif" font-size="${fmt(plan.subtitleSize * 0.78)}" letter-spacing="${fmt(plan.subtitleSize * 0.08)}" text-anchor="middle" fill="${rgb(theme.ink.soft, 0.9)}">${escapeXml(plan.footer)}</text>`,
   );
+  parts.push(`</g>`);
+  }
   // Compass rose.
   if (plan.compass) {
     const { cx, cy, r } = plan.compass;
-    parts.push(`<g id="compass">`);
+    parts.push(`<g id="compass" data-decor="compass">`);
     parts.push(`<circle cx="${fmt(cx)}" cy="${fmt(cy)}" r="${fmt(r)}" fill="none" stroke="${rgb(theme.ink.soft, 0.6)}" stroke-width="${fmt(1 * scale)}"/>`);
     parts.push(`<circle cx="${fmt(cx)}" cy="${fmt(cy)}" r="${fmt(r * 0.72)}" fill="none" stroke="${rgb(theme.ink.soft, 0.4)}" stroke-width="${fmt(0.6 * scale)}"/>`);
     parts.push(`<path d="${starPath(cx, cy, r * 0.9, r * 0.22, 4)}" fill="${rgb(theme.ink.main, 0.72)}"/>`);
@@ -542,7 +519,7 @@ function svgDecor(plan: SvgDecorPlan, width: number, height: number, scale: numb
   if (plan.legend) {
     const lg = plan.legend;
     const rowH = 18 * scale;
-    parts.push(`<g id="legend">`);
+    parts.push(`<g id="legend" data-decor="legend">`);
     parts.push(
       `<rect x="${fmt(lg.x)}" y="${fmt(lg.y)}" width="${fmt(lg.w)}" height="${fmt(lg.h)}" fill="${rgb(theme.paper.light, 0.72)}" stroke="${rgb(theme.ink.border, 0.7)}" stroke-width="${fmt(0.9 * scale)}"/>`,
     );
@@ -569,7 +546,7 @@ function svgDecor(plan: SvgDecorPlan, width: number, height: number, scale: numb
   // Scale bar.
   if (plan.scaleBar) {
     const sb = plan.scaleBar;
-    parts.push(`<g id="scale">`);
+    parts.push(`<g id="scale" data-decor="scaleBar">`);
     const segments = 4;
     for (let i = 0; i < segments; i += 1) {
       const x = sb.x + (sb.w * i) / segments;
@@ -583,6 +560,13 @@ function svgDecor(plan: SvgDecorPlan, width: number, height: number, scale: numb
       );
     });
     parts.push(`</g>`);
+  }
+  // Credits line (configurable, bottom-centre by default).
+  if (plan.credits && plan.credits.text.trim().length > 0) {
+    const cr = plan.credits.rect;
+    parts.push(
+      `<g id="credits" data-decor="credits"><text x="${fmt(cr.x + cr.w / 2)}" y="${fmt(cr.y + cr.h / 2 + plan.credits.size * 0.35)}" font-family="EB Garamond, serif" font-size="${fmt(plan.credits.size)}" text-anchor="middle" fill="${rgb(theme.ink.soft, 0.8)}">${escapeXml(plan.credits.text)}</text></g>`,
+    );
   }
   return parts.join("");
 }

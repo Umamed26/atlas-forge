@@ -18,8 +18,8 @@
       "height": 512,
       "thumbWidth": 256,
       "thumbHeight": 256,
-      "sha256": "f61cf67ab72b877c6cdc0cbc2a706e4b823c5d1e74f94781bda79e1eb3e3cb58",
-      "thumbSha256": "1f67a1248d19b700d3c27443a5728d90cd04bbfbe843f0da2317c768a92cd3ac",
+      "sha256": "be1f430d46f8f50108dad731dd2a9d4e741972a9d98456201e799d426480665f",
+      "thumbSha256": "32c660167e334c1578b1aa2986b51b2f3790a44d92ac57ca2a6479caafbded4f",
       "metrics": {
         "labelsDrawn": 9,
         "labelsSkipped": 9,
@@ -45,8 +45,8 @@
       "height": 1024,
       "thumbWidth": 256,
       "thumbHeight": 256,
-      "sha256": "8bdf2694a31615428f74574d6a01603bbc9c852711372314d76c6b50aeaf4b15",
-      "thumbSha256": "16cd0da89aca72c572324fc57b54cba22ed70df4f68b369a5b89bc6e4af955ac",
+      "sha256": "1af5c26855ace50fa98ec0fd0efcd9b36570858bc35fbfe6b6b4935e7e206b95",
+      "thumbSha256": "f885ca535346d166ae5b0c68b3c194cb2b7edbd60a49657db8510cc785c6cf3f",
       "metrics": {
         "labelsDrawn": 10,
         "labelsSkipped": 10,
@@ -72,8 +72,8 @@
       "height": 512,
       "thumbWidth": 256,
       "thumbHeight": 256,
-      "sha256": "6a80933e24333d45cd0cab144c31558b03cca656c716997a7c8c14b74c836d5a",
-      "thumbSha256": "3e396cdb8d65e4c5e8743c6db13ff25de4a49e78830220992c9bb163cbbb3f0a",
+      "sha256": "85ea5bfc1a6a40d85b4779a8f06937203629a27e2bb6097878f272393c9d06b9",
+      "thumbSha256": "742b5fbb6840aeb94355f36dd1165618a99ce12afad6c251a268bc48b72831f7",
       "metrics": {
         "labelsDrawn": 9,
         "labelsSkipped": 9,
@@ -99,8 +99,8 @@
       "height": 1024,
       "thumbWidth": 256,
       "thumbHeight": 256,
-      "sha256": "ef10dc2abcafdeb5ff5ce3b762b954b3c14b1e0f403f5d7a5a421922a1f813d3",
-      "thumbSha256": "e5ea96166e069995a6818e6c7401432bb0dca13b4862604f441af37b3dd6b046",
+      "sha256": "77ca210379bddd0340d65ac5c2b36d7ea180f75c6273b821692f793d550ab6ef",
+      "thumbSha256": "5486c686724142e6a0a3f36f23406faa136918272d0d2df102dbd3ce624e6d77",
       "metrics": {
         "labelsDrawn": 10,
         "labelsSkipped": 10,

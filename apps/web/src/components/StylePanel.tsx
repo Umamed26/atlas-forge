@@ -11,6 +11,7 @@ import {
   type StyleSliderKey,
   type StyleToggleKey,
 } from "../lib/constants";
+import { DecorationsSection } from "./DecorationsSection";
 import { countOverrides } from "../lib/documentIO";
 import { UI_PREF_KEYS } from "../lib/uiPrefs";
 import { formatMs, formatPercent } from "../lib/utils";
@@ -86,6 +87,15 @@ export function StylePanel() {
           </div>
           <p className="field-hint">在顶栏修改「世界名」会同步更新地图 cartouche 图题。</p>
         </Section>
+        </CollapsibleGroup>
+
+        <CollapsibleGroup
+          title="装饰元素"
+          icon="❖"
+          storageKey={UI_PREF_KEYS.styleStats}
+          testId="group-style-decorations"
+        >
+          <DecorationsSection />
         </CollapsibleGroup>
 
         <CollapsibleGroup

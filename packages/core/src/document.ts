@@ -16,8 +16,9 @@
  *    produces no new *error* issues and the same field values
  *  - pure and dependency-free; input is never mutated
  */
-import { DEFAULT_PARAMS, DEFAULT_STYLE, createDefaultDocument } from "./defaults";
+import { DEFAULT_DECORATIONS, DEFAULT_PARAMS, DEFAULT_STYLE, createDefaultDocument } from "./defaults";
 import { hashString } from "./rng";
+import type { DecorAnchor, DecorConfig, DecorId } from "./types";
 import {
   BIOME_NAMES,
   type BiomeId,
@@ -282,6 +283,15 @@ function normalizeParams(raw: unknown, issues: IssueCollector): WorldParams {
 
 // ── Style ─────────────────────────────────────────────────────────────────
 
+const DECOR_ANCHORS = new Set([
+  "top-left",
+  "top-center",
+  "top-right",
+  "bottom-left",
+  "bottom-center",
+  "bottom-right",
+]);
+
 const STYLE_TOGGLES = [
   "showLabels",
   "showRivers",
@@ -333,6 +343,43 @@ function normalizeStyle(raw: unknown, fallbackTitle: string, issues: IssueCollec
       issues.add(`style.${key}`, "样式数值无效，已使用默认值");
     }
   }
+
+  // ── Map chrome (v0.6): per-element visibility / anchor / text ──────────
+  // Documents written before v0.6 have no `decorations`; their legacy show*
+  // booleans are folded into the element tree so old worlds keep their look.
+  const legacyVisible: Record<string, boolean> = {
+    compass: style.showCompass,
+    legend: style.showLegend,
+    graticule: style.showGraticule,
+    border: style.showBorder,
+  };
+  const decorations: NonNullable<RenderStyle["decorations"]> = {};
+  const rawDecorations = isRecord(source.decorations) ? source.decorations : undefined;
+  const decorIds = Object.keys(DEFAULT_DECORATIONS) as DecorId[];
+  for (const id of decorIds) {
+    const base = DEFAULT_DECORATIONS[id];
+    const rawEntry = rawDecorations && isRecord(rawDecorations[id])
+      ? (rawDecorations[id] as Record<string, unknown>)
+      : undefined;
+    const entry: DecorConfig = { ...base };
+    if (rawEntry) {
+      if (typeof rawEntry.visible === "boolean") entry.visible = rawEntry.visible;
+      else if (rawEntry.visible !== undefined) {
+        issues.add(`style.decorations.${id}.visible`, "可见性不是布尔值，已使用默认值");
+      }
+      if (typeof rawEntry.anchor === "string" && DECOR_ANCHORS.has(rawEntry.anchor)) {
+        entry.anchor = rawEntry.anchor as DecorAnchor;
+      } else if (rawEntry.anchor !== undefined) {
+        issues.add(`style.decorations.${id}.anchor`, "锚点无效，已使用默认位置");
+      }
+      if (typeof rawEntry.text === "string") entry.text = rawEntry.text.slice(0, MAX_NAME_LENGTH);
+      if (typeof rawEntry.subtitle === "string") entry.subtitle = rawEntry.subtitle.slice(0, MAX_NAME_LENGTH);
+    } else if (legacyVisible[id] !== undefined) {
+      entry.visible = legacyVisible[id];
+    }
+    decorations[id] = entry;
+  }
+  style.decorations = decorations;
   return style;
 }
 

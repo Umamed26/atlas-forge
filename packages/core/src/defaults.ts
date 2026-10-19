@@ -1,4 +1,11 @@
-import type { RenderStyle, WorldDocument, WorldParams } from "./types";
+import type {
+  DecorConfig,
+  DecorId,
+  Decorations,
+  RenderStyle,
+  WorldDocument,
+  WorldParams,
+} from "./types";
 
 export const DEFAULT_PARAMS: WorldParams = {
   gridSize: 1024,
@@ -18,6 +25,30 @@ export const DEFAULT_PARAMS: WorldParams = {
   terrainModel: "fbm",
 };
 
+/**
+ * Default map chrome. Every element can be hidden; titles use the world name
+ * unless overridden. Anchors follow traditional cartography (title top-centre,
+ * compass top-right, scale bottom-left, legend bottom-right).
+ */
+export const DEFAULT_DECORATIONS: Required<Record<DecorId, DecorConfig>> = {
+  title: { visible: true, anchor: "top-center" },
+  compass: { visible: true, anchor: "top-right" },
+  scaleBar: { visible: true, anchor: "bottom-left" },
+  legend: { visible: true, anchor: "bottom-right" },
+  graticule: { visible: false },
+  border: { visible: true },
+  credits: { visible: true, anchor: "bottom-center", text: "Atlas Forge" },
+};
+
+/** Merge partial/user decorations with the defaults (per element). */
+export function resolveDecorations(decorations?: Decorations): Required<Record<DecorId, DecorConfig>> {
+  const resolved = {} as Required<Record<DecorId, DecorConfig>>;
+  for (const id of Object.keys(DEFAULT_DECORATIONS) as DecorId[]) {
+    resolved[id] = { ...DEFAULT_DECORATIONS[id], ...(decorations?.[id] ?? {}) };
+  }
+  return resolved;
+}
+
 export const DEFAULT_STYLE: RenderStyle = {
   preset: "parchment-classic",
   title: "Untitled World",
@@ -31,6 +62,7 @@ export const DEFAULT_STYLE: RenderStyle = {
   paperTexture: 0.55,
   hillshadeStrength: 0.55,
   coastHatching: 0.6,
+  decorations: { ...DEFAULT_DECORATIONS },
 };
 
 export interface CreateDocumentOptions {

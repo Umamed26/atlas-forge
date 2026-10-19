@@ -3209,3 +3209,139 @@ textarea {
   font-size: 9.5px;
   color: var(--muted);
 }
+
+/* ── v0.6 map chrome configuration ───────────────────────────────────── */
+.decor-actions {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.decor-row {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-bottom: 8px;
+  border-bottom: 1px dashed rgba(120, 100, 70, 0.18);
+}
+
+.decor-row .select-field {
+  display: grid;
+  grid-template-columns: 42px 1fr;
+  align-items: center;
+  gap: 8px;
+}
+
+.decor-row .select-label {
+  text-align: right;
+}
+
+.decor-text-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 10px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.decor-text-field input {
+  width: 100%;
+  padding: 6px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--panel-border);
+  background: rgba(20, 17, 13, 0.6);
+  color: var(--ink);
+  font-size: 12px;
+}
+
+.decor-text-field input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* ── v0.6 typographic alignment pass ─────────────────────────────────── */
+/* Parameter rows: label left, value right, shared baseline. */
+.slider-field .slider-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+.slider-field .slider-label {
+  text-align: left;
+  flex: 1 1 auto;
+}
+.slider-field .slider-value {
+  text-align: right;
+  flex: 0 0 auto;
+  font-variant-numeric: tabular-nums;
+}
+.select-field .select-label,
+.decor-row .select-label {
+  text-align: left;
+}
+.semantic-scale {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  align-items: baseline;
+  gap: 4px;
+  font-variant-numeric: tabular-nums;
+}
+.semantic-scale > :nth-child(1) { text-align: left; }
+.semantic-scale > :nth-child(2) { text-align: center; }
+.semantic-scale > :nth-child(3) { text-align: right; }
+/* Toggle rows: text block and switch share a vertical centre line. */
+.toggle-field {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.toggle-field .toggle-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.toggle-field .switch {
+  align-self: center;
+  flex: 0 0 auto;
+}
+/* Place list: name left, type right, badge centred. */
+.place-list-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  column-gap: 8px;
+}
+.place-list-row .place-list-name { text-align: left; }
+.place-list-row .place-list-kind { text-align: right; font-variant-numeric: tabular-nums; }
+.place-count-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
+}
+/* Dialogs: single horizontal padding variable for header/body/footer. */
+.modal {
+  --dialog-pad: 18px;
+}
+.modal-head,
+.modal-body,
+.modal-foot {
+  padding-left: var(--dialog-pad);
+  padding-right: var(--dialog-pad);
+}

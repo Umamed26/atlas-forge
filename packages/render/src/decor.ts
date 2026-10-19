@@ -7,6 +7,7 @@
  * the rectangles that labels must avoid and two draw phases: `drawUnder` runs
  * before labels (graticule), `drawOver` after them (frames, cartouche, ageing).
  */
+import { computeChromeLayout } from "./chrome";
 import { hasCjk, textFont } from "./fonts";
 import { drawTrackedText, measureWithTracking } from "./labels";
 import type { Rect } from "./layout";
@@ -35,6 +36,12 @@ interface Layout {
   titleSize: number;
   subtitleSize: number;
   titleTracking: number;
+  // v0.6 chrome configuration
+  titleVisible: boolean;
+  credits: { rect: Rect; text: string; size: number } | null;
+  border: boolean;
+  graticule: boolean;
+  avoid: Rect[];
 }
 
 const ROMAN: Array<[number, string]> = [
@@ -86,99 +93,36 @@ function yearFromDocument(pass: RenderPass): number {
 
 function computeLayout(pass: RenderPass): Layout {
   const { ctx, width, height, scale, theme, document } = pass;
-  const style = document.style;
-  const size = Math.min(width, height);
-  const title = (style.title || document.name || "Untitled World").trim() || "Untitled World";
-  const cjk = hasCjk(title);
-  const m1 = (style.showBorder ? theme.decor.frameInset : 6) * scale;
-  const m2 = (style.showBorder ? theme.decor.frameInnerInset : 10) * scale;
-  const m3 = (style.showBorder ? theme.decor.innerRuleInset : 14) * scale;
-  const titleSize = theme.decor.titleScale * scale;
-  const subtitleSize = theme.decor.subtitleScale * scale;
-  const titleTracking = (cjk ? 0.2 : 0.14) * titleSize;
-  const pad = 12 * scale;
-
-  // Title cartouche, fitted to the frame.
-  const titleText = cjk ? title : title.toUpperCase();
-  const titleFont = textFont(titleText, titleSize, false);
-  let fittedSize = titleSize;
-  let fittedTracking = titleTracking;
-  let titleW = measureWithTracking(ctx, titleText, titleFont, fittedTracking);
-  const maxCartoucheW = Math.min(width * 0.58, width - m3 * 2 - 12 * scale);
-  const maxTextW = maxCartoucheW - pad * 2;
-  for (let i = 0; i < 8 && titleW > maxTextW; i += 1) {
-    fittedSize *= 0.92;
-    fittedTracking = (cjk ? 0.2 : 0.14) * fittedSize;
-    titleW = measureWithTracking(ctx, titleText, textFont(titleText, fittedSize, false), fittedTracking);
-  }
-  const subtitle = cjk ? "寰 宇 图 志" : "A CHART OF THE KNOWN WORLD";
-  const footerText = cjk
-    ? `寰宇工坊 · 种子 ${document.seed}`
-    : `ATLAS FORGE · SEED ${document.seed}`;
-  const cartoucheW = Math.max(width * 0.34, titleW + pad * 2.2);
-  const cartoucheH = fittedSize * 1.55 + subtitleSize * 1.9 + pad * 1.3;
-  const cartouche: Rect = {
-    x: (width - cartoucheW) / 2,
-    y: m1 * 0.55,
-    w: cartoucheW,
-    h: cartoucheH,
-  };
-
-  const compassRadius = theme.decor.compassRadius * scale;
-  const compass = style.showCompass
-    ? {
-        cx: width - m3 - compassRadius * 1.12,
-        cy: m3 + compassRadius * 1.12,
-        r: compassRadius,
-      }
-    : null;
-
-  const scaleW = Math.min(theme.decor.scaleWidth * scale, width * 0.25);
-  const scaleH = theme.decor.scaleHeight * scale;
-  const scaleBar = style.showLegend
-    ? { x: m3 + 10 * scale, y: height - m3 - 26 * scale, w: scaleW, h: scaleH }
-    : null;
-  // The scale bar is always drawn under the map, so reserve its space only if
-  // the legend is also on (otherwise it would collide with the legend box).
-  const showScale = style.showLegend;
-  const scalePlan = showScale
-    ? { x: m3 + 10 * scale, y: height - m3 - 24 * scale, w: scaleW, h: scaleH }
-    : null;
-
-  let legend: Rect | null = null;
-  if (style.showLegend) {
-    const rowH = 18 * scale;
-    const headerH = 20 * scale;
-    const legendW = Math.min(width * 0.215, 260 * scale);
-    const legendH = headerH + rowH * 4 + 12 * scale;
-    legend = {
-      x: width - m3 - legendW,
-      y: height - m3 - legendH,
-      w: legendW,
-      h: legendH,
-    };
-  }
-
-  void scaleBar;
+  const chrome = computeChromeLayout({
+    document,
+    width,
+    height,
+    scale,
+    theme,
+    measure: (text, font, tracking) => measureWithTracking(ctx, text, font, tracking),
+  });
   return {
-    m1,
-    m2,
-    m3,
-    cartouche,
-    compass,
-    scaleBar: scalePlan,
-    legend,
-    title: titleText,
-    subtitle,
-    footer: footerText,
-    cjk,
-    titleSize: fittedSize,
-    subtitleSize,
-    titleTracking: fittedTracking,
+    m1: chrome.m1,
+    m2: chrome.m2,
+    m3: chrome.m3,
+    cartouche: chrome.title.rect,
+    compass: chrome.compass,
+    scaleBar: chrome.scaleBar,
+    legend: chrome.legend,
+    title: chrome.title.text,
+    subtitle: chrome.title.subtitle,
+    footer: chrome.title.footer,
+    cjk: chrome.title.cjk,
+    titleSize: chrome.title.size,
+    subtitleSize: chrome.title.subtitleSize,
+    titleTracking: chrome.title.tracking,
+    titleVisible: chrome.title.visible,
+    credits: chrome.credits,
+    border: chrome.border,
+    graticule: chrome.graticule,
+    avoid: chrome.avoid,
   };
 }
-
-// ── Drawing primitives ────────────────────────────────────────────────────
 
 function roundRectPath(ctx: RenderPass["ctx"], rect: Rect, radius: number): void {
   const r = Math.min(radius, rect.w / 2, rect.h / 2);
@@ -819,43 +763,32 @@ function drawAging(pass: RenderPass): void {
 
 export function planDecorations(pass: RenderPass): DecorPlan {
   const layout = computeLayout(pass);
-  const style = pass.document.style;
-  const avoid: Rect[] = [];
-  avoid.push({
-    x: layout.cartouche.x - 6,
-    y: layout.cartouche.y - 6,
-    w: layout.cartouche.w + 12,
-    h: layout.cartouche.h + 12,
-  });
-  if (layout.compass) {
-    const c = layout.compass;
-    avoid.push({ x: c.cx - c.r, y: c.cy - c.r, w: c.r * 2, h: c.r * 2 });
-  }
-  if (layout.legend) {
-    const l = layout.legend;
-    avoid.push({ x: l.x, y: l.y, w: l.w, h: l.h });
-  }
-  if (layout.scaleBar) {
-    const s = layout.scaleBar;
-    avoid.push({ x: s.x - 4, y: s.y - 6, w: s.w + 8, h: s.h + 22 * pass.scale });
-  }
-  const canvas: Rect = { x: 0, y: 0, w: pass.width, h: pass.height };
-  void canvas;
-
   return {
-    avoid,
+    avoid: layout.avoid.slice(),
     drawUnder(): void {
-      if (style.showGraticule) drawGraticule(pass, layout);
+      if (layout.graticule) drawGraticule(pass, layout);
     },
     drawOver(): void {
-      if (style.showBorder) drawBorder(pass, layout);
-      drawCartouche(pass, layout);
-      if (style.showCompass) drawCompass(pass, layout);
-      if (style.showLegend) {
-        drawScaleBar(pass, layout);
-        drawLegend(pass, layout);
-      }
+      if (layout.border) drawBorder(pass, layout);
+      if (layout.titleVisible) drawCartouche(pass, layout);
+      if (layout.compass) drawCompass(pass, layout);
+      if (layout.scaleBar) drawScaleBar(pass, layout);
+      if (layout.legend) drawLegend(pass, layout);
+      if (layout.credits) drawCredits(pass, layout.credits);
       drawAging(pass);
     },
   };
+}
+
+/** Credits line: configurable text under the map (bottom-centre by default). */
+function drawCredits(pass: RenderPass, credits: { rect: Rect; text: string; size: number }): void {
+  const { ctx, theme } = pass;
+  if (!credits.text.trim()) return;
+  ctx.save();
+  ctx.font = textFont(credits.text, credits.size, false);
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillStyle = cssRgb(theme.ink.soft, 0.8);
+  ctx.fillText(credits.text, credits.rect.x + credits.rect.w / 2, credits.rect.y + credits.rect.h / 2);
+  ctx.restore();
 }

@@ -194,4 +194,4 @@ pnpm qa:desktop       # 桌面端打包产物 E2E（Playwright _electron，含�
 
 界面与成图使用 [EB Garamond](https://github.com/octaviopardo/EBGaramond12)（SIL Open Font License，文件位于 `packages/render/assets/fonts/` 与 `apps/web/public/fonts/`）；Node 端缺字体时回退 Liberation Serif / FreeSerif，浏览器回退系统衬线字体，不会崩溃。
 
-设计与实现细节见 [TODO.md](./TODO.md)（决策、数据契约、里程碑与验收）。
+设计与实现细节见 [TODO.md](./TODO.md)（决策、数据契约、里程碑与验收）；**接手开发请先读 [docs/HANDOFF.md](./docs/HANDOFF.md)**（当前状态、已知坑、验证矩阵与下一步）。
